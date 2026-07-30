@@ -11,3 +11,4 @@
 - Use `jj` when the repository says so or when the checkout is a jj repo; otherwise use git.
 - For complex plans, comparisons, architecture diagrams, review reports, or decision-heavy work, use Lavish: create `.lavish/<name>.html`, run `npx -y lavish-axi <file>`, and poll for feedback when an interactive review loop is useful.
 - The user prefers Herdr as the visible multiplexer; use isolated Herdr tabs/workspaces plus clean git worktrees for parallel work when available.
+- Use `bin/ak primary-set` once per primary session, then have crews hand back with `bin/ak crew-report` instead of routine polling.

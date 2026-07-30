@@ -11,10 +11,21 @@ Usage:
   bin/ak plan <title>
   bin/ak lavish <html-file>
   bin/ak herdr-tab <slug> [cwd] [command...]
+  bin/ak primary-set [--allow-inject] [target]
+  bin/ak primary-show
+  bin/ak crew-spawn <slug> <brief text...>
+  bin/ak crew-status
+  bin/ak crew-audit
+  bin/ak crew-report <slug> <message text...>
+  bin/ak crew-peek <slug> [lines]
+  bin/ak crew-send <slug> <message text...>
+  bin/ak crew-finish <slug> [report text...]
 
 Environment:
   AK_HERDR_SESSION   Herdr session name (default: default)
   AK_HERDR_WORKSPACE Herdr workspace label (default: agent-kit)
+  AK_CREW_COMMAND     command run in new crew tab (default: pi)
+  AK_NO_NOTIFY        disable Herdr notifications when set to 1
 USAGE
 }
 
@@ -41,7 +52,7 @@ doctor() {
 }
 
 init_dirs() {
-  mkdir -p .agent-kit/plans .agent-kit/reports .agent-kit/logs .lavish
+  mkdir -p .agent-kit/plans .agent-kit/reports .agent-kit/logs .agent-kit/crew .agent-kit/worktrees .lavish
   printf 'initialized .agent-kit/ and .lavish/\n'
 }
 
@@ -106,15 +117,10 @@ herdr_workspace_id() {
   printf '%s' "$out" | jq -r '.result.workspace.workspace_id // .workspace.workspace_id // .workspace.id // .result.workspace.id'
 }
 
-herdr_tab() {
-  [ "$#" -ge 1 ] || { printf 'slug required\n' >&2; exit 2; }
-  need herdr >/dev/null
-  need jq >/dev/null
-  slug=$(slugify "$1")
-  shift
-  [ -n "$slug" ] || { printf 'invalid slug\n' >&2; exit 2; }
-  cwd=${1:-$PWD}
-  if [ "$#" -gt 0 ]; then shift; fi
+herdr_tab_create() {
+  slug=$1
+  cwd=$2
+  shift 2
   [ -d "$cwd" ] || { printf 'cwd does not exist: %s\n' "$cwd" >&2; exit 1; }
   session=${AK_HERDR_SESSION:-default}
   workspace=${AK_HERDR_WORKSPACE:-agent-kit}
@@ -132,6 +138,389 @@ herdr_tab() {
     herdr pane run "$pane" "$cmd" --session "$session"
     printf 'ran: %s\n' "$cmd"
   fi
+  HERDR_CREATED_SESSION=$session
+  HERDR_CREATED_WORKSPACE=$workspace
+  HERDR_CREATED_TAB=$tab
+  HERDR_CREATED_PANE=$pane
+}
+
+herdr_tab() {
+  [ "$#" -ge 1 ] || { printf 'slug required\n' >&2; exit 2; }
+  need herdr >/dev/null
+  need jq >/dev/null
+  slug=$(slugify "$1")
+  shift
+  [ -n "$slug" ] || { printf 'invalid slug\n' >&2; exit 2; }
+  cwd=${1:-$PWD}
+  if [ "$#" -gt 0 ]; then shift; fi
+  herdr_tab_create "$slug" "$cwd" "$@"
+}
+
+repo_root() {
+  git rev-parse --show-toplevel 2>/dev/null || { printf 'not inside a git repository
+' >&2; exit 1; }
+}
+
+agentkit_dir() {
+  printf '%s/.agent-kit' "$(repo_root)"
+}
+
+primary_path() {
+  printf '%s/primary' "$(agentkit_dir)"
+}
+
+primary_show() {
+  path=$(primary_path)
+  if [ -f "$path" ]; then
+    cat "$path"
+  else
+    printf 'no primary registered\n'
+    return 1
+  fi
+}
+
+primary_set() {
+  session=${AK_HERDR_SESSION:-default}
+  inject=0
+  if [ "${1:-}" = "--allow-inject" ]; then
+    inject=1
+    shift
+  fi
+  target=${1:-}
+  if [ -z "$target" ]; then
+    info=$(herdr pane current --current --session "$session" 2>/dev/null) || {
+      printf 'could not inspect current Herdr pane; pass an explicit target\n' >&2
+      exit 1
+    }
+    target=$(printf '%s' "$info" | jq -r '.result.pane.pane_id // .pane.pane_id // .pane_id // empty' 2>/dev/null)
+    agent=$(printf '%s' "$info" | jq -r '.result.pane.agent // .pane.agent // empty' 2>/dev/null)
+    tab=$(printf '%s' "$info" | jq -r '.result.pane.tab_id // .pane.tab_id // empty' 2>/dev/null)
+    workspace=$(printf '%s' "$info" | jq -r '.result.pane.workspace_id // .pane.workspace_id // empty' 2>/dev/null)
+    cwd=$(printf '%s' "$info" | jq -r '.result.pane.cwd // .pane.cwd // empty' 2>/dev/null)
+  else
+    agent=$(herdr agent get "$target" --session "$session" 2>/dev/null | jq -r '.result.agent.agent // .agent.agent // .result.agent.name // empty' 2>/dev/null || printf '')
+    tab=''
+    workspace=''
+    cwd=''
+  fi
+  [ -n "$target" ] || { printf 'could not determine primary target\n' >&2; exit 1; }
+  mkdir -p "$(agentkit_dir)"
+  cat >"$(primary_path)" <<EOF
+session=$session
+target=$target
+agent=$agent
+tab=${tab:-}
+workspace=${workspace:-}
+cwd=${cwd:-}
+inject=$inject
+registered_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+  printf 'primary target registered: %s\n' "$target"
+  if [ "$inject" = 1 ]; then
+    printf 'primary direct injection: enabled\n'
+  else
+    printf 'primary direct injection: disabled (notifications only)\n'
+  fi
+}
+
+primary_target() {
+  path=$(primary_path)
+  [ -f "$path" ] || return 1
+  awk -F= '$1=="target" {print substr($0, index($0,"=")+1); exit}' "$path"
+}
+
+primary_session() {
+  path=$(primary_path)
+  [ -f "$path" ] || return 1
+  awk -F= '$1=="session" {print substr($0, index($0,"=")+1); exit}' "$path"
+}
+
+primary_inject() {
+  path=$(primary_path)
+  [ -f "$path" ] || return 1
+  awk -F= '$1=="inject" {print substr($0, index($0,"=")+1); exit}' "$path"
+}
+
+primary_notify() {
+  message=$*
+  session=$(primary_session 2>/dev/null || printf '%s' "${AK_HERDR_SESSION:-default}")
+  command -v herdr >/dev/null 2>&1 || return 1
+  [ "${AK_NO_NOTIFY:-0}" = 1 ] || herdr notification show "agent-kit crew update" --body "$message" --sound done --session "$session" >/dev/null 2>&1 || true
+  [ "$(primary_inject 2>/dev/null || printf 0)" = 1 ] || return 0
+  target=$(primary_target 2>/dev/null || true)
+  [ -n "$target" ] || return 0
+  if herdr pane send-text "$target" "$message" --session "$session" >/dev/null 2>&1; then
+    herdr pane send-keys "$target" enter --session "$session" >/dev/null 2>&1 || true
+  else
+    herdr agent send "$target" "$message" --session "$session" >/dev/null 2>&1 || true
+  fi
+}
+
+crew_base() {
+  printf '%s/.agent-kit/crew' "$(repo_root)"
+}
+
+crew_dir() {
+  printf '%s/%s' "$(crew_base)" "$1"
+}
+
+crew_meta_path() {
+  printf '%s/meta' "$(crew_dir "$1")"
+}
+
+crew_report_path() {
+  printf '%s/report.md' "$(crew_dir "$1")"
+}
+
+crew_branch_name() {
+  printf 'ak/%s' "$1"
+}
+
+crew_field() {
+  slug=$1
+  field=$2
+  meta=$(crew_meta_path "$slug")
+  [ -f "$meta" ] || { printf 'unknown crew: %s\n' "$slug" >&2; exit 1; }
+  awk -F= -v f="$field" '$1==f {sub($1"=", ""); print; exit}' "$meta"
+}
+
+crew_worktree_clean() {
+  worktree=$1
+  [ -d "$worktree" ] || return 2
+  [ -z "$(git -C "$worktree" status --porcelain 2>/dev/null)" ]
+}
+
+crew_spawn() {
+  [ "$#" -ge 2 ] || { printf 'usage: bin/ak crew-spawn <slug> <brief text...>\n' >&2; exit 2; }
+  need git >/dev/null
+  need herdr >/dev/null
+  need jq >/dev/null
+  slug=$(slugify "$1")
+  shift
+  [ -n "$slug" ] || { printf 'invalid slug\n' >&2; exit 2; }
+  brief=$*
+  root=$(repo_root)
+  crew_dir="$root/.agent-kit/crew/$slug"
+  worktree="$root/.agent-kit/worktrees/$slug"
+  branch="ak/$slug"
+  [ ! -e "$crew_dir" ] || { printf 'crew already exists: %s\n' "$slug" >&2; exit 1; }
+  [ ! -e "$worktree" ] || { printf 'worktree already exists: %s\n' "$worktree" >&2; exit 1; }
+  if git -C "$root" show-ref --verify --quiet "refs/heads/$branch"; then
+    printf 'branch already exists: %s\n' "$branch" >&2
+    exit 1
+  fi
+  mkdir -p "$crew_dir" "$root/.agent-kit/worktrees"
+  git -C "$root" worktree add -b "$branch" "$worktree" HEAD >/dev/null
+  cat >"$crew_dir/brief.md" <<EOF
+# Crew task: $slug
+
+## Brief
+
+$brief
+
+## Contract
+
+- Read project instructions before changing files.
+- Work only inside this isolated worktree: $worktree
+- Make the smallest correct change.
+- Run relevant checks.
+- Do not merge, force-push, reset, clean, or discard work.
+- When ready to hand back, run: bin/ak crew-report $slug "summary, changed files, checks, blockers" so the primary gets a push notification.
+- Report changed files, checks, and blockers to the primary agent.
+EOF
+  cat >"$crew_dir/report.template.md" <<EOF
+# Crew report: $slug
+
+## Outcome
+
+## Files changed
+
+## Checks
+
+## Notes
+EOF
+  printf 'state=running\nstarted_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$crew_dir/state"
+  cmd=${AK_CREW_COMMAND:-pi}
+  herdr_tab_create "crew-$slug" "$worktree" "$cmd"
+  cat >"$crew_dir/meta" <<EOF
+slug=$slug
+repo=$root
+worktree=$worktree
+branch=$branch
+brief=$crew_dir/brief.md
+herdr_session=$HERDR_CREATED_SESSION
+herdr_workspace=$HERDR_CREATED_WORKSPACE
+herdr_tab=$HERDR_CREATED_TAB
+herdr_pane=$HERDR_CREATED_PANE
+command=$cmd
+created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+  if [ -n "${HERDR_CREATED_PANE:-}" ]; then
+    herdr pane send-text "$HERDR_CREATED_PANE" "Read $crew_dir/brief.md and begin. Report status in chat when ready." --session "$HERDR_CREATED_SESSION" >/dev/null 2>&1 || true
+    herdr pane send-keys "$HERDR_CREATED_PANE" enter --session "$HERDR_CREATED_SESSION" >/dev/null 2>&1 || true
+  fi
+  printf 'crew spawned: %s\n' "$slug"
+  printf 'worktree: %s\n' "$worktree"
+  printf 'brief: %s\n' "$crew_dir/brief.md"
+}
+
+crew_status() {
+  base=$(crew_base)
+  [ -d "$base" ] || { printf 'no crew state\n'; return 0; }
+  printf 'slug\tstate\tworktree\tbranch\treport\n'
+  for meta in "$base"/*/meta; do
+    [ -f "$meta" ] || continue
+    slug=$(awk -F= '$1=="slug" {print $2}' "$meta")
+    pane=$(awk -F= '$1=="herdr_pane" {print $2}' "$meta")
+    session=$(awk -F= '$1=="herdr_session" {print $2}' "$meta")
+    worktree=$(awk -F= '$1=="worktree" {print $2}' "$meta")
+    branch=$(awk -F= '$1=="branch" {print $2}' "$meta")
+    report=$(crew_report_path "$slug")
+    state=unknown
+    if [ -n "$pane" ] && [ -n "$session" ] && command -v herdr >/dev/null 2>&1; then
+      state=$(herdr agent get "$pane" --session "$session" 2>/dev/null | jq -r '.result.agent.agent_status // .error.code // "unknown"' 2>/dev/null || printf unknown)
+      [ -n "$state" ] || state=unknown
+    fi
+    if [ -n "$worktree" ] && [ -d "$worktree" ]; then
+      if crew_worktree_clean "$worktree"; then
+        cleanliness=clean
+      else
+        cleanliness=dirty
+      fi
+    else
+      cleanliness=missing
+    fi
+    if [ -f "$report" ]; then
+      report_state=yes
+    else
+      report_state=no
+    fi
+    printf '%s\t%s/%s\t%s\t%s\t%s\n' "$slug" "$state" "$cleanliness" "$worktree" "$branch" "$report_state"
+  done
+}
+
+crew_audit() {
+  base=$(crew_base)
+  [ -d "$base" ] || { printf 'no crew state\n'; return 0; }
+  for meta in "$base"/*/meta; do
+    [ -f "$meta" ] || continue
+    slug=$(awk -F= '$1=="slug" {print $2}' "$meta")
+    pane=$(awk -F= '$1=="herdr_pane" {print $2}' "$meta")
+    session=$(awk -F= '$1=="herdr_session" {print $2}' "$meta")
+    worktree=$(awk -F= '$1=="worktree" {print $2}' "$meta")
+    branch=$(awk -F= '$1=="branch" {print $2}' "$meta")
+    report=$(crew_report_path "$slug")
+    state=unknown
+    if [ -n "$pane" ] && [ -n "$session" ] && command -v herdr >/dev/null 2>&1; then
+      state=$(herdr agent get "$pane" --session "$session" 2>/dev/null | jq -r '.result.agent.agent_status // .error.code // "unknown"' 2>/dev/null || printf unknown)
+      [ -n "$state" ] || state=unknown
+    fi
+    if [ -n "$worktree" ] && [ -d "$worktree" ]; then
+      if crew_worktree_clean "$worktree"; then
+        cleanliness=clean
+      else
+        cleanliness=dirty
+      fi
+    else
+      cleanliness=missing
+    fi
+    if [ -f "$report" ]; then
+      report_state=ready
+    else
+      report_state=missing
+    fi
+    printf '%s\n' "- $slug: state=$state, worktree=$cleanliness, branch=$branch, report=$report_state"
+    if [ "$cleanliness" = dirty ]; then
+      printf '  worktree: %s\n' "$worktree"
+    fi
+  done
+}
+
+crew_report() {
+  [ "$#" -ge 2 ] || { printf 'usage: bin/ak crew-report <slug> <message text...>\n' >&2; exit 2; }
+  slug=$(slugify "$1")
+  shift
+  meta=$(crew_meta_path "$slug")
+  [ -f "$meta" ] || { printf 'unknown crew: %s\n' "$slug" >&2; exit 1; }
+  report=$(crew_report_path "$slug")
+  mkdir -p "$(dirname "$report")"
+  {
+    printf '# Crew report: %s\n\n' "$slug"
+    printf '## Outcome\n\n%s\n\n' "$*"
+    printf '## Files changed\n\n- see worktree\n\n'
+    printf '## Checks\n\n- pending or included above\n\n'
+    printf '## Notes\n\n- reported_at: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } >"$report"
+  reported_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  printf 'state=reported\nreported_at=%s\n' "$reported_at" >"$(dirname "$meta")/state"
+  inbox="$(agentkit_dir)/inbox"
+  mkdir -p "$inbox"
+  printf '# Crew update: %s\n\n- reported_at: %s\n- report: %s\n\n%s\n' "$slug" "$reported_at" "$report" "$*" >"$inbox/${reported_at}-$slug.md"
+  primary_notify "crew $slug: $*" >/dev/null 2>&1 || true
+  printf 'crew reported: %s\n' "$slug"
+  printf 'report: %s\n' "$report"
+}
+
+crew_finish() {
+  [ "$#" -ge 1 ] || { printf 'usage: bin/ak crew-finish <slug> [report text...]\n' >&2; exit 2; }
+  slug=$(slugify "$1")
+  shift
+  root=$(repo_root)
+  meta=$(crew_meta_path "$slug")
+  [ -f "$meta" ] || { printf 'unknown crew: %s\n' "$slug" >&2; exit 1; }
+  worktree=$(crew_field "$slug" worktree)
+  branch=$(crew_field "$slug" branch)
+  tab=$(crew_field "$slug" herdr_tab)
+  session=$(crew_field "$slug" herdr_session)
+  report=$(crew_report_path "$slug")
+  if [ "$#" -gt 0 ]; then
+    mkdir -p "$(dirname "$report")"
+    cat >"$report" <<EOF
+# Crew report: $slug
+
+$*
+EOF
+  elif [ ! -f "$report" ]; then
+    printf 'report missing for crew: %s\n' "$slug" >&2
+    printf 'write one with: bin/ak crew-report %s "summary..."\n' "$slug" >&2
+    exit 1
+  fi
+  if ! crew_worktree_clean "$worktree"; then
+    printf 'crew worktree is dirty; review before finishing: %s\n' "$worktree" >&2
+    git -C "$worktree" status --short >&2 || true
+    exit 1
+  fi
+  if command -v herdr >/dev/null 2>&1 && [ -n "$tab" ] && [ -n "$session" ]; then
+    herdr tab close "$tab" --session "$session" >/dev/null 2>&1 || { printf 'could not close Herdr tab for %s\n' "$slug" >&2; exit 1; }
+  fi
+  git -C "$root" worktree remove "$worktree" >/dev/null 2>&1 || { printf 'could not remove worktree %s\n' "$worktree" >&2; exit 1; }
+  git -C "$root" branch -D "$branch" >/dev/null 2>&1 || true
+  printf 'state=done\nfinished_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$(dirname "$meta")/state"
+  printf 'crew finished: %s\n' "$slug"
+  printf 'report: %s\n' "$report"
+}
+
+crew_meta_field() {
+  crew_field "$1" "$2"
+}
+
+crew_peek() {
+  [ "$#" -ge 1 ] || { printf 'usage: bin/ak crew-peek <slug> [lines]\n' >&2; exit 2; }
+  slug=$(slugify "$1")
+  lines=${2:-80}
+  pane=$(crew_meta_field "$slug" herdr_pane)
+  session=$(crew_meta_field "$slug" herdr_session)
+  herdr pane read "$pane" --source recent --lines "$lines" --session "$session"
+}
+
+crew_send() {
+  [ "$#" -ge 2 ] || { printf 'usage: bin/ak crew-send <slug> <message text...>\n' >&2; exit 2; }
+  slug=$(slugify "$1")
+  shift
+  pane=$(crew_meta_field "$slug" herdr_pane)
+  session=$(crew_meta_field "$slug" herdr_session)
+  herdr pane send-text "$pane" "$*" --session "$session"
+  herdr pane send-keys "$pane" enter --session "$session"
 }
 
 cmd=${1:-}
@@ -141,6 +530,15 @@ case "$cmd" in
   plan) shift; new_plan "$@" ;;
   lavish) shift; open_lavish "$@" ;;
   herdr-tab) shift; herdr_tab "$@" ;;
+  primary-set) shift; primary_set "$@" ;;
+  primary-show) shift; primary_show "$@" ;;
+  crew-spawn) shift; crew_spawn "$@" ;;
+  crew-status) shift; crew_status "$@" ;;
+  crew-audit) shift; crew_audit "$@" ;;
+  crew-report) shift; crew_report "$@" ;;
+  crew-peek) shift; crew_peek "$@" ;;
+  crew-send) shift; crew_send "$@" ;;
+  crew-finish) shift; crew_finish "$@" ;;
   -h|--help|help|'') usage ;;
   *) printf 'unknown command: %s\n\n' "$cmd" >&2; usage >&2; exit 2 ;;
 esac

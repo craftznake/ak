@@ -39,6 +39,7 @@ For complex plans, comparisons, architecture diagrams, review reports, or decisi
 
 - The user prefers Herdr as the visible multiplexer.
 - For parallel work, prefer isolated Herdr tabs/workspaces plus clean git worktrees over shared mutable terminals.
+- Use `bin/ak primary-set` once per primary session, then have crews hand back with `bin/ak crew-report` instead of routine polling.
 - Keep task labels stable and human-readable.
 - If Herdr is unavailable, explain the fallback rather than silently changing the workflow.
 

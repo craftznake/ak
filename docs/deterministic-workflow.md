@@ -4,21 +4,25 @@ This is the lightweight, personal version inspired by Firstmate's operating mode
 
 ## Goals
 
-- One visible place to inspect active work.
+- One primary agent coordinating the rest.
 - Small, reversible changes.
 - Clean task boundaries.
 - Plans before risky work.
 - Explicit verification before claiming completion.
+- Safety first: isolate, supervise, then merge only with approval.
 
 ## Default loop
 
 1. **Intake** - restate objective, repo, constraints, and done condition.
 2. **Orient** - read instructions, repo status, package/tooling files, and only then source.
 3. **Plan** - for non-trivial work, write a short checklist; use Lavish for visual/decision-heavy plans.
-4. **Isolate** - use a clean worktree for parallel or risky changes.
+4. **Spawn crews when parallelism helps** - create isolated worktrees and visible Herdr tabs.
 5. **Implement** - make the smallest correct edits.
 6. **Verify** - run narrow checks, then broader checks if warranted.
-7. **Handoff** - report changed files, checks, and unresolved risk.
+7. **Supervise** - the primary agent checks progress, blockers, and safety boundaries.
+8. **Audit** - verify each crew has a clean worktree and a written report before cleanup.
+9. **Finish** - close the crew only after the safety gate passes.
+10. **Handoff** - report changed files, checks, and unresolved risk.
 
 ## Worktree policy
 
