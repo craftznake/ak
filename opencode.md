@@ -10,6 +10,8 @@
 - Use the deterministic loop: orient, state intent, constrain scope, verify, report.
 - Use `jj` when the repository says so or when the checkout is a jj repo; otherwise use git.
 - For complex plans, comparisons, architecture diagrams, review reports, or decision-heavy work, use Lavish: create `.lavish/<name>.html`, run `npx -y lavish-axi <file>`, and poll for feedback when an interactive review loop is useful.
+- Treat `docs/` as the detailed operating spec, not just human prose: `docs/primary-agent-model.md` owns delegation, `docs/reporting-model.md` owns push reporting, `docs/safety-model.md` owns cleanup boundaries, `docs/herdr-workflow.md` owns Herdr usage, `docs/supervision-model.md` owns supervision, `docs/onboarding.md` owns setup, and `docs/deterministic-workflow.md` owns the engineering loop.
+- Before changing or extending one of these workflows, read the owning doc first.
 - The user likes talking to one primary agent that autonomously delegates suitable work to crews.
 - For multi-step, parallelizable, investigative, or risky software work, act as the primary: make a short dispatch plan, spawn crews with `bin/ak crew-spawn`, and supervise reports.
 - Keep tiny direct answers or trivial edits in the primary session.

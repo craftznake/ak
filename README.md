@@ -21,6 +21,7 @@ This is intentionally a **small Firstmate-inspired workflow**. It keeps the part
 - `bin/ak` - small helper for setup, plans, Lavish, Herdr tabs, and crew lifecycle
 - `docs/deterministic-workflow.md` - workflow contract
 - `docs/herdr-workflow.md` - Herdr usage notes
+- `docs/onboarding.md` - setup on this machine, other machines, and per repo
 - `docs/primary-agent-model.md` - firstmate-style primary delegation behavior
 - `docs/supervision-model.md` - crew supervision commands and loop
 - `docs/reporting-model.md` - push reporting from crews to the primary
@@ -42,6 +43,26 @@ The script:
 - symlinks the local Lavish skill into `~/.claude/skills/lavish`
 
 If opencode already has a config, add `opencode.md` manually to preserve existing providers, plugins, and permissions.
+
+## Onboarding
+
+See `docs/onboarding.md` for global, per-machine, and per-repo setup.
+
+Short version:
+
+```sh
+git clone <your-agent-kit-repo-url> ~/agent-kit
+cd ~/agent-kit
+./install.sh
+bin/ak doctor
+```
+
+In a work repo:
+
+```sh
+~/agent-kit/bin/ak init
+~/agent-kit/bin/ak primary-set
+```
 
 ## Daily workflow
 

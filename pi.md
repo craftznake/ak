@@ -21,6 +21,20 @@
 
 For complex plans, comparisons, architecture diagrams, review reports, or decision-heavy work, use Lavish: create `.lavish/<name>.html`, run `npx -y lavish-axi <file>`, and poll for feedback when the user wants an interactive review loop.
 
+## Operational docs
+
+Treat `docs/` as the detailed operating spec, not just human prose:
+
+- `docs/onboarding.md` owns global/per-repo setup.
+- `docs/primary-agent-model.md` owns when and how the primary delegates.
+- `docs/herdr-workflow.md` owns Herdr usage and visible crew layout.
+- `docs/reporting-model.md` owns push reporting from crews to the primary.
+- `docs/supervision-model.md` owns primary supervision commands and loop.
+- `docs/safety-model.md` owns cleanup, dirty-worktree, and destructive-action boundaries.
+- `docs/deterministic-workflow.md` owns the engineering loop.
+
+Before changing or extending one of these workflows, read the owning doc first.
+
 ## Primary agent / Herdr preference
 
 - The user likes talking to one primary agent that autonomously delegates suitable work to crews.
