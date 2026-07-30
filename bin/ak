@@ -11,12 +11,15 @@ Usage:
   bin/ak plan <title>
   bin/ak lavish <html-file>
   bin/ak herdr-tab <slug> [cwd] [command...]
-  bin/ak primary-set [--allow-inject] [target]
+  bin/ak primary-set [--notify-only|--allow-inject] [target]
   bin/ak primary-show
   bin/ak crew-spawn <slug> <brief text...>
   bin/ak crew-status
   bin/ak crew-audit
   bin/ak crew-report <slug> <message text...>
+  bin/ak crew-cost <slug> <usd|unknown> [note...]
+  bin/ak crew-cost-summary
+  bin/ak crew-cost-prompt [message...]
   bin/ak crew-peek <slug> [lines]
   bin/ak crew-send <slug> <message text...>
   bin/ak crew-finish <slug> [report text...]
@@ -26,6 +29,8 @@ Environment:
   AK_HERDR_WORKSPACE Herdr workspace label (default: agent-kit)
   AK_CREW_COMMAND     command run in new crew tab (default: pi)
   AK_NO_NOTIFY        disable Herdr notifications when set to 1
+  AK_NO_WAKE          disable primary wakeup injection when set to 1
+  AK_COST_CURRENCY    currency label for crew-cost (default: USD)
 USAGE
 }
 
@@ -249,8 +254,11 @@ primary_show() {
 
 primary_set() {
   session=${AK_HERDR_SESSION:-default}
-  inject=0
-  if [ "${1:-}" = "--allow-inject" ]; then
+  inject=1
+  if [ "${1:-}" = "--notify-only" ]; then
+    inject=0
+    shift
+  elif [ "${1:-}" = "--allow-inject" ]; then
     inject=1
     shift
   fi
@@ -286,9 +294,9 @@ registered_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
   printf 'primary target registered: %s\n' "$target"
   if [ "$inject" = 1 ]; then
-    printf 'primary direct injection: enabled\n'
+    printf 'primary wakeup: enabled (crew reports will message this agent)\n'
   else
-    printf 'primary direct injection: disabled (notifications only)\n'
+    printf 'primary wakeup: disabled (notifications/inbox only)\n'
   fi
 }
 
@@ -315,7 +323,8 @@ primary_notify() {
   session=$(primary_session 2>/dev/null || printf '%s' "${AK_HERDR_SESSION:-default}")
   command -v herdr >/dev/null 2>&1 || return 1
   [ "${AK_NO_NOTIFY:-0}" = 1 ] || herdr notification show "agent-kit crew update" --body "$message" --sound done --session "$session" >/dev/null 2>&1 || true
-  [ "$(primary_inject 2>/dev/null || printf 0)" = 1 ] || return 0
+  [ "${AK_NO_WAKE:-0}" = 1 ] && return 0
+  [ "$(primary_inject 2>/dev/null || printf 1)" = 1 ] || return 0
   target=$(primary_target 2>/dev/null || true)
   [ -n "$target" ] || return 0
   if herdr pane send-text "$target" "$message" --session "$session" >/dev/null 2>&1; then
@@ -339,6 +348,10 @@ crew_meta_path() {
 
 crew_report_path() {
   printf '%s/report.md' "$(crew_dir "$1")"
+}
+
+crew_cost_path() {
+  printf '%s/cost.tsv' "$(crew_dir "$1")"
 }
 
 crew_branch_name() {
@@ -407,8 +420,9 @@ $brief
 - Make the smallest correct change.
 - Run relevant checks.
 - Do not merge, force-push, reset, clean, or discard work.
-- When ready to hand back, run: $ak_cmd crew-report $slug "summary, changed files, checks, blockers" so the primary gets a push notification.
-- Report changed files, checks, and blockers to the primary agent.
+- Log spend when asked, at meaningful milestones, and before handback with: cd "$root" && $ak_cmd crew-cost $slug <usd|unknown> "model/session, token estimate if known, and what work the spend covered".
+- When ready to hand back, run: cd "$root" && $ak_cmd crew-report $slug "summary, files changed, checks, cost notes, blockers" so the primary gets a push notification.
+- Report changed files, checks, cost notes, and blockers to the primary agent.
 EOF
   cat >"$crew_dir/report.template.md" <<EOF
 # Crew report: $slug
@@ -418,6 +432,8 @@ EOF
 ## Files changed
 
 ## Checks
+
+## Cost
 
 ## Notes
 EOF
@@ -439,8 +455,25 @@ command=$cmd
 created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
   if [ -n "${HERDR_CREATED_PANE:-}" ]; then
-    herdr pane send-text "$HERDR_CREATED_PANE" "Read $crew_dir/brief.md and begin. When ready, report with: $ak_cmd crew-report $slug \"summary, changed files, checks, blockers\"" --session "$HERDR_CREATED_SESSION" >/dev/null 2>&1 || true
-    herdr pane send-keys "$HERDR_CREATED_PANE" enter --session "$HERDR_CREATED_SESSION" >/dev/null 2>&1 || true
+    startup_prompt="Read $crew_dir/brief.md and begin. When ready, report from the primary repo root with: cd \"$root\" && $ak_cmd crew-report $slug \"summary, changed files, checks, blockers\""
+    i=0
+    while [ "$i" -lt 30 ]; do
+      agent_status=$(herdr agent get "$HERDR_CREATED_PANE" --session "$HERDR_CREATED_SESSION" 2>/dev/null | jq -r '.result.agent.agent_status // empty' 2>/dev/null || true)
+      [ -n "$agent_status" ] && break
+      i=$((i + 1))
+      sleep 0.5
+    done
+    if [ -z "${agent_status:-}" ]; then
+      sleep "${AK_CREW_STARTUP_DELAY:-3}"
+    fi
+    if ! herdr pane send-text "$HERDR_CREATED_PANE" "$startup_prompt" --session "$HERDR_CREATED_SESSION" >/dev/null 2>&1; then
+      printf 'warning: could not send startup prompt to crew pane %s\n' "$HERDR_CREATED_PANE" >&2
+    elif ! herdr pane send-keys "$HERDR_CREATED_PANE" Enter --session "$HERDR_CREATED_SESSION" >/dev/null 2>&1; then
+      printf 'warning: sent startup prompt but could not submit it in crew pane %s\n' "$HERDR_CREATED_PANE" >&2
+    else
+      sleep "${AK_CREW_SUBMIT_DELAY:-0.5}"
+      herdr pane send-keys "$HERDR_CREATED_PANE" Enter --session "$HERDR_CREATED_SESSION" >/dev/null 2>&1 || true
+    fi
   fi
   printf 'crew spawned: %s\n' "$slug"
   printf 'worktree: %s\n' "$worktree"
@@ -519,6 +552,79 @@ crew_audit() {
   done
 }
 
+crew_cost() {
+  [ "$#" -ge 2 ] || { printf 'usage: bin/ak crew-cost <slug> <usd|unknown> [note...]\n' >&2; exit 2; }
+  slug=$(slugify "$1")
+  amount=$2
+  shift 2
+  meta=$(crew_meta_path "$slug")
+  [ -f "$meta" ] || { printf 'unknown crew: %s\n' "$slug" >&2; exit 1; }
+  currency=${AK_COST_CURRENCY:-USD}
+  cost=$(crew_cost_path "$slug")
+  mkdir -p "$(dirname "$cost")"
+  if [ ! -f "$cost" ]; then
+    printf 'timestamp\tslug\tamount\tcurrency\tprovider\tmodel\tsession\tnote\n' >"$cost"
+  fi
+  note=$*
+  note=$(printf '%s' "$note" | tr '\t\n' '  ')
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "$slug" \
+    "$amount" \
+    "$currency" \
+    "${PI_PROVIDER:-${AK_PROVIDER:-unknown}}" \
+    "${PI_MODEL:-${AK_MODEL:-unknown}}" \
+    "${PI_SESSION_ID:-unknown}" \
+    "$note" >>"$cost"
+  printf 'crew cost logged: %s\n' "$slug"
+  printf 'cost: %s\n' "$cost"
+}
+
+crew_cost_summary() {
+  base=$(crew_base)
+  [ -d "$base" ] || { printf 'no crew state\n'; return 0; }
+  found=0
+  total=0
+  printf 'slug\tentries\tknown_total\tunknown_entries\tcurrency\n'
+  for meta in "$base"/*/meta; do
+    [ -f "$meta" ] || continue
+    slug=$(awk -F= '$1=="slug" {print $2}' "$meta")
+    cost=$(crew_cost_path "$slug")
+    [ -f "$cost" ] || continue
+    found=1
+    awk -F '\t' -v slug="$slug" '
+      NR == 1 {next}
+      $3 ~ /^[0-9]+([.][0-9]+)?$/ {sum += $3; known += 1; currency = $4; next}
+      {unknown += 1; if (currency == "") currency = $4}
+      END {printf "%s\t%d\t%.6f\t%d\t%s\n", slug, known + unknown, sum, unknown, (currency == "" ? "USD" : currency)}
+    ' "$cost"
+    crew_sum=$(awk -F '\t' 'NR > 1 && $3 ~ /^[0-9]+([.][0-9]+)?$/ {sum += $3} END {printf "%.6f", sum}' "$cost")
+    total=$(awk -v a="$total" -v b="$crew_sum" 'BEGIN {printf "%.6f", a + b}')
+  done
+  [ "$found" = 1 ] || { printf 'no crew cost logs\n'; return 0; }
+  printf 'TOTAL\t-\t%.6f\t-\t%s\n' "$total" "${AK_COST_CURRENCY:-USD}"
+}
+
+crew_cost_prompt() {
+  base=$(crew_base)
+  [ -d "$base" ] || { printf 'no crew state\n'; return 0; }
+  ak_cmd=$(self_path)
+  custom=$*
+  sent=0
+  for meta in "$base"/*/meta; do
+    [ -f "$meta" ] || continue
+    slug=$(awk -F= '$1=="slug" {print $2}' "$meta")
+    pane=$(awk -F= '$1=="herdr_pane" {print $2}' "$meta")
+    session=$(awk -F= '$1=="herdr_session" {print $2}' "$meta")
+    [ -n "$pane" ] && [ -n "$session" ] || continue
+    message="Please log current estimated spend with: $ak_cmd crew-cost $slug <usd|unknown> \"model/session, token estimate if known, and what work the spend covered\". ${custom:-}"
+    herdr pane send-text "$pane" "$message" --session "$session" >/dev/null 2>&1 || continue
+    herdr pane send-keys "$pane" enter --session "$session" >/dev/null 2>&1 || true
+    sent=$((sent + 1))
+  done
+  printf 'cost prompts sent: %s\n' "$sent"
+}
+
 crew_report() {
   [ "$#" -ge 2 ] || { printf 'usage: bin/ak crew-report <slug> <message text...>\n' >&2; exit 2; }
   slug=$(slugify "$1")
@@ -532,6 +638,7 @@ crew_report() {
     printf '## Outcome\n\n%s\n\n' "$*"
     printf '## Files changed\n\n- see worktree\n\n'
     printf '## Checks\n\n- pending or included above\n\n'
+    printf '## Cost\n\n- see cost.tsv or included above\n\n'
     printf '## Notes\n\n- reported_at: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   } >"$report"
   reported_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -630,6 +737,9 @@ case "$cmd" in
   crew-status) shift; crew_status "$@" ;;
   crew-audit) shift; crew_audit "$@" ;;
   crew-report) shift; crew_report "$@" ;;
+  crew-cost) shift; crew_cost "$@" ;;
+  crew-cost-summary) shift; crew_cost_summary "$@" ;;
+  crew-cost-prompt) shift; crew_cost_prompt "$@" ;;
   crew-peek) shift; crew_peek "$@" ;;
   crew-send) shift; crew_send "$@" ;;
   crew-finish) shift; crew_finish "$@" ;;

@@ -16,7 +16,7 @@ herdr workspace create --label agent-kit --cwd "$PWD" --no-focus
 herdr tab create --label ak-fix-login --cwd "$PWD" --no-focus
 ```
 
-Then start the desired harness in the tab, for example `pi`, `claude`, `opencode`, or `codex`.
+Then start the desired harness/model in the tab, for example `pi`, `claude`, `opencode`, or `codex`. Choose the lightest sufficient model for the crew's workload.
 
 ## Helper script
 
@@ -30,6 +30,7 @@ bin/ak plan "migration strategy"
 bin/ak lavish .lavish/migration-strategy.html
 bin/ak herdr-tab fix-login .
 bin/ak crew-spawn fix-login "stabilize the flaky login test"
+AK_CREW_COMMAND='<harness/model command>' bin/ak crew-spawn docs-sweep "update related docs with a lightweight model"
 bin/ak crew-status
 bin/ak crew-audit
 bin/ak crew-report fix-login "ready for review"

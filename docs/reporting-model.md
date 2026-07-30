@@ -10,11 +10,15 @@ Run this once from the primary agent's Herdr tab:
 bin/ak primary-set
 ```
 
-This records the primary Herdr target in `.agent-kit/primary`. By default it uses safe notification-only mode and does not inject text into the primary agent's composer. If you explicitly want direct agent injection, opt in:
+This records the primary Herdr target in `.agent-kit/primary`. By default crew reports wake the primary by sending the report message into the registered agent/pane. This avoids a blocking wait loop while still letting crews trigger the next primary-agent turn.
+
+If you want inbox/notification-only behavior, opt out:
 
 ```sh
-bin/ak primary-set --allow-inject
+bin/ak primary-set --notify-only
 ```
+
+`--allow-inject` is still accepted for older habits, but wakeup is now the default.
 
 Inspect it with:
 
@@ -36,9 +40,9 @@ That command:
 - appends `.agent-kit/inbox/<timestamp>-<slug>.md`
 - marks the crew state as `reported`
 - shows a Herdr notification when available (`AK_NO_NOTIFY=1` disables it)
-- sends the summary directly into the registered primary agent only when `--allow-inject` was used
+- wakes the registered primary agent by sending the summary into its Herdr target (`AK_NO_WAKE=1` disables this per command)
 
-If no primary is registered, the command still writes the report and inbox entry; it just cannot target a primary session.
+If no primary is registered, the command still writes the report and inbox entry; it just cannot wake a primary session.
 
 ## Cleanup remains separate
 

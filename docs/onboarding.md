@@ -18,9 +18,15 @@ Then restart your agent harnesses.
 What `install.sh` does:
 
 - symlinks `claude.md` to `~/.claude/CLAUDE.md`
-- copies `pi.md` to `~/.pi/agent/AGENTS.md`
+- symlinks `shared.md` beside Claude's entrypoint for relative imports
+- symlinks `pi.md` to `~/.pi/agent/AGENTS.md`
+- symlinks `shared.md` beside Pi's entrypoint for relative imports
+- symlinks `bin/ak` to `~/.local/bin/ak`
+- adds an idempotent `~/.local/bin` PATH block to the active shell's startup file when that file is writable
 - creates an opencode config only if one does not already exist
 - symlinks the local Lavish skill into `~/.claude/skills/lavish`
+
+Existing non-symlink install targets are moved to `*.agent-kit-backup.*` before the symlink is installed.
 
 For opencode with an existing config, add this repo's `opencode.md` to its `instructions` array manually.
 
@@ -46,15 +52,11 @@ Crews report back with:
 /path/to/agent-kit/bin/ak crew-report fix-login "fixed, tests passed, ready for review"
 ```
 
-## Optional shell convenience
+## Shell convenience
 
-Add a shell alias yourself if desired:
+`install.sh` symlinks `ak` into `~/.local/bin/ak` and appends a marked, idempotent PATH block for the active shell (`~/.zshrc`, `~/.bashrc`, fish `conf.d`, or `~/.profile`) when that block is not already installed and the startup file is writable.
 
-```sh
-alias ak="$HOME/agent-kit/bin/ak"
-```
-
-Then use:
+After install, restart the shell or source the updated startup file, then use:
 
 ```sh
 ak doctor
@@ -62,8 +64,6 @@ ak init
 ak primary-set
 ak crew-spawn fix-login "stabilize flaky login test"
 ```
-
-`install.sh` intentionally does not edit shell startup files automatically.
 
 ## Per-repo setup
 
@@ -122,4 +122,4 @@ This is better when the project team wants the same helper scripts and docs.
 
 - `.agent-kit/` and `.lavish/` are local runtime state and should stay gitignored.
 - `primary-set` is per work repo/session because it records the current primary Herdr target.
-- Use `primary-set --allow-inject` only if you want crews to directly inject report messages into the primary agent. Default mode is safer notification/inbox reporting.
+- `primary-set` wakes the registered primary by default when crews report. Use `primary-set --notify-only` if you want notification/inbox-only reporting.

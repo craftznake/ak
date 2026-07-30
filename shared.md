@@ -52,8 +52,9 @@ Before changing or extending one of these workflows, read the owning doc first.
 ## Primary agent / crew workflow
 
 - The user likes talking to one primary agent that autonomously delegates suitable work to crews.
-- For multi-step, parallelizable, investigative, or risky software work, act as the primary: make a short dispatch plan, spawn crews with `bin/ak crew-spawn`, and supervise reports.
-- Keep tiny direct answers or trivial edits in the primary session.
+- Delegate by default whenever useful: if a task can reasonably be split, investigated independently, isolated in a worktree, or handed to a focused worker, spawn crews with `bin/ak crew-spawn` instead of doing it all in the primary session.
+- Keep only truly tiny direct answers, immediate clarification, or trivial low-risk edits in the primary session.
+- Choose the lightest sufficient crew model/command for the workload; use stronger models only for complex architecture, risky refactors, ambiguous debugging, or final synthesis/review.
 - The user prefers Herdr as the visible multiplexer.
 - For parallel work, prefer isolated Herdr tabs plus clean VCS workspaces (`jj workspace` for jj repos, git worktrees for git repos) over shared mutable terminals.
 - Use `bin/ak primary-set` once per primary session, then have crews hand back with `bin/ak crew-report` instead of routine polling.

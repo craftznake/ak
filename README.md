@@ -38,9 +38,14 @@ This is intentionally a **small Firstmate-inspired workflow**. It keeps the part
 The script:
 
 - symlinks `claude.md` to `~/.claude/CLAUDE.md`
-- copies `pi.md` to `~/.pi/agent/AGENTS.md`
+- symlinks `pi.md` to `~/.pi/agent/AGENTS.md`
+- symlinks `shared.md` beside those entrypoints for relative imports
+- symlinks `bin/ak` to `~/.local/bin/ak`
+- adds an idempotent `~/.local/bin` PATH block to the active shell's startup file when that file is writable
 - creates an opencode config only when one does not already exist
 - symlinks the local Lavish skill into `~/.claude/skills/lavish`
+
+Existing non-symlink install targets are moved to `*.agent-kit-backup.*` before the symlink is installed.
 
 If opencode already has a config, add `opencode.md` manually to preserve existing providers, plugins, and permissions.
 
@@ -60,8 +65,8 @@ bin/ak doctor
 In a work repo:
 
 ```sh
-~/agent-kit/bin/ak init
-~/agent-kit/bin/ak primary-set
+ak init
+ak primary-set
 ```
 
 ## Daily workflow
