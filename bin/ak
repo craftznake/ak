@@ -1,0 +1,146 @@
+#!/usr/bin/env sh
+set -eu
+
+usage() {
+  cat <<'USAGE'
+agent-kit helper
+
+Usage:
+  bin/ak doctor
+  bin/ak init
+  bin/ak plan <title>
+  bin/ak lavish <html-file>
+  bin/ak herdr-tab <slug> [cwd] [command...]
+
+Environment:
+  AK_HERDR_SESSION   Herdr session name (default: default)
+  AK_HERDR_WORKSPACE Herdr workspace label (default: agent-kit)
+USAGE
+}
+
+slugify() {
+  printf '%s' "$*" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9][^a-z0-9]*/-/g; s/^-//; s/-$//' | cut -c1-60
+}
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || { printf 'missing: %s\n' "$1" >&2; return 1; }
+}
+
+doctor() {
+  ok=0
+  for tool in git npx; do need "$tool" || ok=1; done
+  if command -v jj >/dev/null 2>&1; then printf 'ok: jj\n'; else printf 'info: jj not installed\n'; fi
+  if command -v herdr >/dev/null 2>&1; then
+    printf 'ok: herdr (%s)\n' "$(herdr status --json 2>/dev/null | sed 's/[[:space:]]\+/ /g' | cut -c1-160 || printf 'status unavailable')"
+  else
+    printf 'missing: herdr (required for Herdr tab helpers)\n' >&2
+    ok=1
+  fi
+  if command -v jq >/dev/null 2>&1; then printf 'ok: jq\n'; else printf 'missing: jq (required for Herdr JSON parsing)\n' >&2; ok=1; fi
+  return "$ok"
+}
+
+init_dirs() {
+  mkdir -p .agent-kit/plans .agent-kit/reports .agent-kit/logs .lavish
+  printf 'initialized .agent-kit/ and .lavish/\n'
+}
+
+new_plan() {
+  [ "$#" -gt 0 ] || { printf 'plan title required\n' >&2; exit 2; }
+  title=$*
+  slug=$(slugify "$title")
+  [ -n "$slug" ] || slug=plan
+  path=".agent-kit/plans/$(date +%Y%m%d-%H%M%S)-$slug.md"
+  mkdir -p .agent-kit/plans
+  cat >"$path" <<EOF
+# $title
+
+## Objective
+
+## Constraints
+
+## Plan
+
+- [ ] Orient
+- [ ] Implement smallest correct change
+- [ ] Verify
+- [ ] Handoff
+
+## Verification
+
+## Notes
+EOF
+  printf '%s\n' "$path"
+}
+
+open_lavish() {
+  [ "$#" -eq 1 ] || { printf 'html file required\n' >&2; exit 2; }
+  npx -y lavish-axi "$1"
+}
+
+herdr_server_ensure() {
+  session=$1
+  running=$(herdr status --json --session "$session" 2>/dev/null | jq -r '.server.running // false' 2>/dev/null || printf false)
+  [ "$running" = true ] && return 0
+  ( herdr server --session "$session" >/dev/null 2>&1 & ) || return 1
+  i=0
+  while [ "$i" -lt 20 ]; do
+    running=$(herdr status --json --session "$session" 2>/dev/null | jq -r '.server.running // false' 2>/dev/null || printf false)
+    [ "$running" = true ] && return 0
+    i=$((i + 1))
+    sleep 0.5
+  done
+  printf 'herdr server did not start for session: %s\n' "$session" >&2
+  return 1
+}
+
+herdr_workspace_id() {
+  session=$1
+  label=$2
+  herdr_server_ensure "$session"
+  if out=$(herdr workspace list --session "$session" 2>/dev/null); then
+    id=$(printf '%s' "$out" | jq -r --arg label "$label" '(.result.workspaces // .workspaces // [])[] | select(.label == $label) | (.workspace_id // .id) ' 2>/dev/null | head -n 1)
+    [ -n "$id" ] && { printf '%s' "$id"; return 0; }
+  fi
+  out=$(herdr workspace create --label "$label" --cwd "$PWD" --no-focus --session "$session")
+  printf '%s' "$out" | jq -r '.result.workspace.workspace_id // .workspace.workspace_id // .workspace.id // .result.workspace.id'
+}
+
+herdr_tab() {
+  [ "$#" -ge 1 ] || { printf 'slug required\n' >&2; exit 2; }
+  need herdr >/dev/null
+  need jq >/dev/null
+  slug=$(slugify "$1")
+  shift
+  [ -n "$slug" ] || { printf 'invalid slug\n' >&2; exit 2; }
+  cwd=${1:-$PWD}
+  if [ "$#" -gt 0 ]; then shift; fi
+  [ -d "$cwd" ] || { printf 'cwd does not exist: %s\n' "$cwd" >&2; exit 1; }
+  session=${AK_HERDR_SESSION:-default}
+  workspace=${AK_HERDR_WORKSPACE:-agent-kit}
+  wsid=$(herdr_workspace_id "$session" "$workspace")
+  label="ak-$slug"
+  out=$(herdr tab create --workspace "$wsid" --label "$label" --cwd "$cwd" --no-focus --session "$session")
+  pane=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // .root_pane.pane_id // empty')
+  tab=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // .tab.tab_id // empty')
+  printf 'created Herdr tab %s in workspace %s (session %s)\n' "$label" "$workspace" "$session"
+  [ -n "$tab" ] && printf 'tab: %s\n' "$tab"
+  [ -n "$pane" ] && printf 'pane: %s\n' "$pane"
+  if [ "$#" -gt 0 ]; then
+    cmd=$*
+    [ -n "$pane" ] || { printf 'could not parse pane id; not running command\n' >&2; exit 1; }
+    herdr pane run "$pane" "$cmd" --session "$session"
+    printf 'ran: %s\n' "$cmd"
+  fi
+}
+
+cmd=${1:-}
+case "$cmd" in
+  doctor) shift; doctor "$@" ;;
+  init) shift; init_dirs "$@" ;;
+  plan) shift; new_plan "$@" ;;
+  lavish) shift; open_lavish "$@" ;;
+  herdr-tab) shift; herdr_tab "$@" ;;
+  -h|--help|help|'') usage ;;
+  *) printf 'unknown command: %s\n\n' "$cmd" >&2; usage >&2; exit 2 ;;
+esac

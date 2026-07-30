@@ -1,49 +1,66 @@
 # agent-kit
 
-Portable shared instructions for `opencode`, Claude Code, and Pi.
+Personal portable agent instructions and lightweight workflow helpers for Claude Code, Pi, opencode, and any agent that reads `AGENTS.md`.
 
-## What is here
+This is intentionally **not** a full Firstmate clone. It keeps the parts that fit a deterministic software-engineering workflow:
 
-- `shared.md` - the core instruction set
-- `claude.md` - Claude Code entrypoint that imports `shared.md`
-- `opencode.md` - opencode instruction file
-- `pi.md` - Pi instruction file
+- shared harness instructions
+- Herdr-first visible task tabs
+- small plan/verify/handoff loop
+- Lavish-powered interactive planning when prose is not enough
+- no autonomous merges, destructive cleanup, or hidden fleet state
 
-## How to use
+## Layout
 
-Run:
+- `shared.md` - source-of-truth behavior for agents
+- `AGENTS.md` - repo entrypoint that imports `shared.md`
+- `claude.md` - Claude Code entrypoint
+- `pi.md` - Pi entrypoint
+- `opencode.md` - opencode entrypoint
+- `bin/ak` - small helper for setup, plans, Lavish, and Herdr tabs
+- `docs/deterministic-workflow.md` - workflow contract
+- `docs/herdr-workflow.md` - Herdr usage notes
+- `docs/research-notes.md` - notes from Firstmate and Lavish research
+- `.agents/skills/lavish/` - local Lavish skill prompt
+
+## Install
 
 ```sh
 ./install.sh
 ```
 
-The script symlinks Claude Code, copies Pi instructions, and creates a minimal opencode config only when one does not already exist.
+The script:
 
-If opencode already has a config, add the `opencode.md` path manually to preserve existing providers, plugins, and permissions.
+- symlinks `claude.md` to `~/.claude/CLAUDE.md`
+- copies `pi.md` to `~/.pi/agent/AGENTS.md`
+- creates an opencode config only when one does not already exist
+- symlinks the local Lavish skill into `~/.claude/skills/lavish`
 
-### Claude Code
+If opencode already has a config, add `opencode.md` manually to preserve existing providers, plugins, and permissions.
 
-Copy or symlink `claude.md` to `~/.claude/CLAUDE.md`.
+## Daily workflow
 
-### Pi
-
-Copy `pi.md` to `~/.pi/agent/AGENTS.md`.
-
-### opencode
-
-Point `instructions` in `~/.config/opencode/opencode.json` at `opencode.md`.
-
-Example:
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "instructions": ["/absolute/path/to/agent-kit/opencode.md"]
-}
+```sh
+bin/ak doctor
+bin/ak init
+bin/ak plan "fix flaky login test"
+bin/ak herdr-tab fix-login . pi
 ```
 
-## Notes
+For interactive planning:
 
-- Keep this repo small and portable.
-- Update `shared.md` first when changing behavior.
-- Keep the harness-specific files thin wrappers around `shared.md`.
+```sh
+mkdir -p .lavish
+# agent writes .lavish/plan.html
+bin/ak lavish .lavish/plan.html
+npx -y lavish-axi poll .lavish/plan.html
+```
+
+## Design influences
+
+Researched inspirations:
+
+- `kunchenguid/firstmate`: agent distro, visible crew, Herdr backend, isolated worktrees, explicit project modes, strong safety boundaries.
+- `kunchenguid/lavish-axi`: local-first HTML review loop, annotation/polling workflow, visual plans and reports.
+
+This repo keeps a smaller personal setup suitable for a software engineer who wants deterministic, inspectable work rather than a full autonomous crew manager.

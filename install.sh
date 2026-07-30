@@ -3,10 +3,15 @@ set -eu
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
-mkdir -p "$HOME/.claude" "$HOME/.pi/agent" "$HOME/.config/opencode"
+mkdir -p "$HOME/.claude" "$HOME/.pi/agent" "$HOME/.config/opencode" "$HOME/.claude/skills"
 
 ln -sf "$repo_dir/claude.md" "$HOME/.claude/CLAUDE.md"
 cp "$repo_dir/pi.md" "$HOME/.pi/agent/AGENTS.md"
+
+if [ -d "$repo_dir/.agents/skills/lavish" ]; then
+  ln -sfn "$repo_dir/.agents/skills/lavish" "$HOME/.claude/skills/lavish"
+  printf 'Installed Claude Lavish skill symlink.\n'
+fi
 
 opencode_config="$HOME/.config/opencode/opencode.json"
 if [ ! -f "$opencode_config" ]; then
