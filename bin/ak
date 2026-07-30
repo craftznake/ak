@@ -358,6 +358,41 @@ crew_branch_name() {
   printf 'ak/%s' "$1"
 }
 
+jj_current_change_id() {
+  jj -R "$1" log --no-graph -r @ -T 'change_id.short()' --no-pager 2>/dev/null
+}
+
+jj_change_empty() {
+  root=$1
+  rev=$2
+  [ -n "$rev" ] || return 1
+  [ -z "$(jj -R "$root" diff -r "$rev" --summary 2>/dev/null)" ]
+}
+
+jj_change_description() {
+  jj -R "$1" log --no-graph -r "$2" -T 'description' --no-pager 2>/dev/null
+}
+
+jj_abandon_empty_change() {
+  root=$1
+  rev=$2
+  expected_desc=$3
+  [ -n "$rev" ] || return 0
+  if ! jj -R "$root" log --no-graph -r "$rev" -T 'change_id.short()' --no-pager >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! jj_change_empty "$root" "$rev"; then
+    printf 'jj workspace change is not empty; leaving it intact: %s\n' "$rev" >&2
+    return 1
+  fi
+  desc=$(jj_change_description "$root" "$rev")
+  if [ "$desc" != "$expected_desc" ]; then
+    printf 'jj workspace change description did not match; leaving it intact: %s\n' "$rev" >&2
+    return 1
+  fi
+  jj -R "$root" abandon "$rev" >/dev/null 2>&1 || { printf 'could not abandon jj workspace change %s\n' "$rev" >&2; return 1; }
+}
+
 crew_field() {
   slug=$1
   field=$2
@@ -395,8 +430,10 @@ crew_spawn() {
   [ ! -e "$worktree" ] || { printf 'worktree already exists: %s\n' "$worktree" >&2; exit 1; }
   lock_acquire "$root/.agent-kit/locks/crew-spawn.lock"
   mkdir -p "$crew_dir" "$root/.agent-kit/worktrees"
+  jj_change=
   if [ "$vcs" = jj ]; then
     jj -R "$root" workspace add --name "$slug" -m "agent-kit crew: $slug" "$worktree" >/dev/null
+    jj_change=$(jj_current_change_id "$worktree")
   else
     need git >/dev/null
     if git -C "$root" show-ref --verify --quiet "refs/heads/$branch"; then
@@ -446,6 +483,7 @@ repo=$root
 worktree=$worktree
 branch=$branch
 vcs=$vcs
+jj_change=$jj_change
 brief=$crew_dir/brief.md
 herdr_session=$HERDR_CREATED_SESSION
 herdr_workspace=$HERDR_CREATED_WORKSPACE
@@ -686,11 +724,28 @@ EOF
     fi
     exit 1
   fi
+  jj_change=
+  if [ "$vcs" = jj ]; then
+    jj_change=$(crew_field "$slug" jj_change 2>/dev/null || true)
+    [ -n "$jj_change" ] || jj_change=$(jj_current_change_id "$worktree" 2>/dev/null || true)
+    if [ -n "$jj_change" ] && jj -R "$root" log --no-graph -r "$jj_change" -T 'change_id.short()' --no-pager >/dev/null 2>&1; then
+      if ! jj_change_empty "$root" "$jj_change"; then
+        printf 'jj workspace change is not empty; leaving crew intact: %s\n' "$jj_change" >&2
+        exit 1
+      fi
+      desc=$(jj_change_description "$root" "$jj_change")
+      if [ "$desc" != "agent-kit crew: $slug" ]; then
+        printf 'jj workspace change description did not match; leaving crew intact: %s\n' "$jj_change" >&2
+        exit 1
+      fi
+    fi
+  fi
   if command -v herdr >/dev/null 2>&1 && [ -n "$tab" ] && [ -n "$session" ]; then
     herdr tab close "$tab" --session "$session" >/dev/null 2>&1 || { printf 'could not close Herdr tab for %s\n' "$slug" >&2; exit 1; }
   fi
   if [ "$vcs" = jj ]; then
     jj -R "$root" workspace forget "$slug" >/dev/null 2>&1 || { printf 'could not forget jj workspace %s\n' "$slug" >&2; exit 1; }
+    jj_abandon_empty_change "$root" "$jj_change" "agent-kit crew: $slug"
     rm -rf "$worktree" || { printf 'could not remove workspace directory %s\n' "$worktree" >&2; exit 1; }
   else
     git -C "$root" worktree remove "$worktree" >/dev/null 2>&1 || { printf 'could not remove worktree %s\n' "$worktree" >&2; exit 1; }

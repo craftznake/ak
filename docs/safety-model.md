@@ -11,6 +11,7 @@ The repo uses a simple human-supervised crew model.
 - No merge, force-push, reset, clean, or discard happens without explicit approval.
 - A crew can be closed only when its worktree is clean.
 - A crew should have a report before it is finished.
+- VCS-specific cleanup behavior is documented in `docs/vcs-workflow.md`.
 - A crew should push its completion note back to the primary with `bin/ak crew-report`.
 
 ## Lifecycle

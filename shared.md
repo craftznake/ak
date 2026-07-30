@@ -45,6 +45,7 @@ Treat `docs/` as the detailed operating spec, not just human prose:
 - `docs/reporting-model.md` owns push reporting from crews to the primary.
 - `docs/supervision-model.md` owns primary supervision commands and loop.
 - `docs/safety-model.md` owns cleanup, dirty-worktree, and destructive-action boundaries.
+- `docs/vcs-workflow.md` owns jj/git workspace, worktree, bookmark/branch, and crew cleanup behavior.
 - `docs/deterministic-workflow.md` owns the engineering loop.
 
 Before changing or extending one of these workflows, read the owning doc first.
