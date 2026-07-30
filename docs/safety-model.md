@@ -5,7 +5,7 @@ The repo uses a simple human-supervised crew model.
 ## Rules
 
 - One primary agent coordinates the workflow.
-- Every parallel task gets its own git worktree.
+- Every parallel task gets its own VCS workspace (`jj workspace` for jj repos, git worktree for git repos).
 - Every crew is visible in Herdr.
 - The primary agent is responsible for review, checks, and final judgment.
 - No merge, force-push, reset, clean, or discard happens without explicit approval.
@@ -17,14 +17,14 @@ The repo uses a simple human-supervised crew model.
 
 1. Register the primary with `bin/ak primary-set`.
 2. Spawn a crew with `bin/ak crew-spawn`.
-3. Work in the isolated worktree.
+3. Work in the isolated workspace.
 4. Push completion back with `bin/ak crew-report`.
 5. Audit progress with `bin/ak crew-audit`.
 6. Finish the crew with `bin/ak crew-finish` once the worktree is clean.
 
 ## Failure handling
 
-- Dirty worktree: stop and inspect before cleanup.
+- Dirty worktree/workspace: stop and inspect before cleanup.
 - Missing report: write one before finish.
 - Missing Herdr session: keep the worktree intact.
 - Unknown state: treat conservatively and do not clean up automatically.

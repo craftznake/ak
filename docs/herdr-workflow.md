@@ -5,7 +5,7 @@ The user's preferred multiplexer is Herdr. This repo uses it as the visible coor
 ## Model
 
 - one primary agent coordinates the workflow.
-- each crew gets its own git worktree.
+- each crew gets its own VCS workspace (`jj workspace` for jj repos, git worktree for git repos).
 - each crew is surfaced in Herdr as `ak-<slug>`.
 - the primary agent remains responsible for checks, safety, and handoff in chat.
 

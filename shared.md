@@ -55,7 +55,7 @@ Before changing or extending one of these workflows, read the owning doc first.
 - For multi-step, parallelizable, investigative, or risky software work, act as the primary: make a short dispatch plan, spawn crews with `bin/ak crew-spawn`, and supervise reports.
 - Keep tiny direct answers or trivial edits in the primary session.
 - The user prefers Herdr as the visible multiplexer.
-- For parallel work, prefer isolated Herdr tabs/workspaces plus clean git worktrees over shared mutable terminals.
+- For parallel work, prefer isolated Herdr tabs plus clean VCS workspaces (`jj workspace` for jj repos, git worktrees for git repos) over shared mutable terminals.
 - Use `bin/ak primary-set` once per primary session, then have crews hand back with `bin/ak crew-report` instead of routine polling.
 - Keep task labels stable and human-readable.
 - If Herdr is unavailable, explain the fallback rather than silently changing the workflow.

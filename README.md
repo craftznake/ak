@@ -5,7 +5,7 @@ Personal portable agent instructions and lightweight workflow helpers for Claude
 This is intentionally a **small Firstmate-inspired workflow**. It keeps the parts that fit a deterministic software-engineering setup:
 
 - one primary agent coordinating multiple crews
-- isolated git worktrees per crew
+- isolated VCS workspaces per crew (`jj workspace` for jj repos, git worktrees for git repos)
 - Herdr-visible task tabs
 - a small plan/verify/handoff loop
 - Lavish-powered interactive planning when prose is not enough
@@ -90,7 +90,7 @@ npx -y lavish-axi poll .lavish/plan.html
 
 Researched inspirations:
 
-- `kunchenguid/firstmate`: agent distro, visible crew, Herdr backend, isolated worktrees, explicit project modes, strong safety boundaries.
+- `kunchenguid/firstmate`: agent distro, visible crew, Herdr backend, isolated workspaces, explicit project modes, strong safety boundaries.
 - `kunchenguid/lavish-axi`: local-first HTML review loop, annotation/polling workflow, visual plans and reports.
 
 This repo keeps a smaller personal setup suitable for a software engineer who wants deterministic, inspectable work with one primary agent and visible crews rather than a full autonomous fleet manager.

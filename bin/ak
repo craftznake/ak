@@ -37,6 +37,18 @@ need() {
   command -v "$1" >/dev/null 2>&1 || { printf 'missing: %s\n' "$1" >&2; return 1; }
 }
 
+self_path() {
+  case $0 in
+    /*) printf '%s\n' "$0" ;;
+    */*)
+      dir=$(dirname "$0")
+      base=$(basename "$0")
+      (cd "$dir" 2>/dev/null && printf '%s/%s\n' "$PWD" "$base") || printf '%s\n' "$0"
+      ;;
+    *) command -v "$0" 2>/dev/null || printf '%s\n' "$0" ;;
+  esac
+}
+
 doctor() {
   ok=0
   for tool in git npx; do need "$tool" || ok=1; done
@@ -51,8 +63,51 @@ doctor() {
   return "$ok"
 }
 
+append_once() {
+  file=$1
+  line=$2
+  mkdir -p "$(dirname "$file")"
+  [ -f "$file" ] || : >"$file"
+  grep -qxF "$line" "$file" 2>/dev/null || printf '%s\n' "$line" >>"$file"
+}
+
+ensure_runtime_ignored() {
+  root=$(repo_root 2>/dev/null || printf '%s' "$PWD")
+  exclude="$root/.git/info/exclude"
+  if [ -d "$root/.git/info" ]; then
+    append_once "$exclude" '# agent-kit local runtime state'
+    append_once "$exclude" '.agent-kit/'
+    append_once "$exclude" '.lavish/'
+  fi
+}
+
+lock_acquire() {
+  lockdir=$1
+  mkdir -p "$(dirname "$lockdir")"
+  i=0
+  while ! mkdir "$lockdir" 2>/dev/null; do
+    i=$((i + 1))
+    if [ "$i" -ge 120 ]; then
+      printf 'timed out waiting for lock: %s\n' "$lockdir" >&2
+      exit 1
+    fi
+    sleep 0.5
+  done
+  AK_LOCK_DIR=$lockdir
+  trap 'if [ -n "${AK_LOCK_DIR:-}" ]; then rmdir "$AK_LOCK_DIR" 2>/dev/null || true; fi' EXIT HUP INT TERM
+}
+
+lock_release() {
+  if [ -n "${AK_LOCK_DIR:-}" ]; then
+    rmdir "$AK_LOCK_DIR" 2>/dev/null || true
+    AK_LOCK_DIR=
+    trap - EXIT HUP INT TERM
+  fi
+}
+
 init_dirs() {
   mkdir -p .agent-kit/plans .agent-kit/reports .agent-kit/logs .agent-kit/crew .agent-kit/worktrees .lavish
+  ensure_runtime_ignored
   printf 'initialized .agent-kit/ and .lavish/\n'
 }
 
@@ -118,14 +173,14 @@ herdr_workspace_id() {
 }
 
 herdr_tab_create() {
-  slug=$1
+  tab_slug=$1
   cwd=$2
   shift 2
   [ -d "$cwd" ] || { printf 'cwd does not exist: %s\n' "$cwd" >&2; exit 1; }
   session=${AK_HERDR_SESSION:-default}
   workspace=${AK_HERDR_WORKSPACE:-agent-kit}
   wsid=$(herdr_workspace_id "$session" "$workspace")
-  label="ak-$slug"
+  label="ak-$tab_slug"
   out=$(herdr tab create --workspace "$wsid" --label "$label" --cwd "$cwd" --no-focus --session "$session")
   pane=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // .root_pane.pane_id // empty')
   tab=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // .tab.tab_id // empty')
@@ -157,8 +212,21 @@ herdr_tab() {
 }
 
 repo_root() {
-  git rev-parse --show-toplevel 2>/dev/null || { printf 'not inside a git repository
+  if command -v jj >/dev/null 2>&1 && root=$(jj root 2>/dev/null); then
+    printf '%s\n' "$root"
+    return 0
+  fi
+  git rev-parse --show-toplevel 2>/dev/null || { printf 'not inside a git or jj repository
 ' >&2; exit 1; }
+}
+
+repo_vcs() {
+  root=$(repo_root)
+  if [ -e "$root/.jj" ] && command -v jj >/dev/null 2>&1; then
+    printf 'jj\n'
+  else
+    printf 'git\n'
+  fi
 }
 
 agentkit_dir() {
@@ -204,6 +272,7 @@ primary_set() {
     cwd=''
   fi
   [ -n "$target" ] || { printf 'could not determine primary target\n' >&2; exit 1; }
+  ensure_runtime_ignored
   mkdir -p "$(agentkit_dir)"
   cat >"$(primary_path)" <<EOF
 session=$session
@@ -287,12 +356,15 @@ crew_field() {
 crew_worktree_clean() {
   worktree=$1
   [ -d "$worktree" ] || return 2
-  [ -z "$(git -C "$worktree" status --porcelain 2>/dev/null)" ]
+  if [ -e "$worktree/.jj" ] && command -v jj >/dev/null 2>&1; then
+    jj -R "$worktree" status --no-pager 2>/dev/null | grep -q '^The working copy has no changes\.$'
+  else
+    [ -z "$(git -C "$worktree" status --porcelain 2>/dev/null)" ]
+  fi
 }
 
 crew_spawn() {
   [ "$#" -ge 2 ] || { printf 'usage: bin/ak crew-spawn <slug> <brief text...>\n' >&2; exit 2; }
-  need git >/dev/null
   need herdr >/dev/null
   need jq >/dev/null
   slug=$(slugify "$1")
@@ -300,17 +372,27 @@ crew_spawn() {
   [ -n "$slug" ] || { printf 'invalid slug\n' >&2; exit 2; }
   brief=$*
   root=$(repo_root)
+  ensure_runtime_ignored
+  vcs=$(repo_vcs)
+  ak_cmd=$(self_path)
   crew_dir="$root/.agent-kit/crew/$slug"
   worktree="$root/.agent-kit/worktrees/$slug"
   branch="ak/$slug"
   [ ! -e "$crew_dir" ] || { printf 'crew already exists: %s\n' "$slug" >&2; exit 1; }
   [ ! -e "$worktree" ] || { printf 'worktree already exists: %s\n' "$worktree" >&2; exit 1; }
-  if git -C "$root" show-ref --verify --quiet "refs/heads/$branch"; then
-    printf 'branch already exists: %s\n' "$branch" >&2
-    exit 1
-  fi
+  lock_acquire "$root/.agent-kit/locks/crew-spawn.lock"
   mkdir -p "$crew_dir" "$root/.agent-kit/worktrees"
-  git -C "$root" worktree add -b "$branch" "$worktree" HEAD >/dev/null
+  if [ "$vcs" = jj ]; then
+    jj -R "$root" workspace add --name "$slug" -m "agent-kit crew: $slug" "$worktree" >/dev/null
+  else
+    need git >/dev/null
+    if git -C "$root" show-ref --verify --quiet "refs/heads/$branch"; then
+      printf 'branch already exists: %s\n' "$branch" >&2
+      exit 1
+    fi
+    git -C "$root" worktree add -b "$branch" "$worktree" HEAD >/dev/null
+  fi
+  lock_release
   cat >"$crew_dir/brief.md" <<EOF
 # Crew task: $slug
 
@@ -325,7 +407,7 @@ $brief
 - Make the smallest correct change.
 - Run relevant checks.
 - Do not merge, force-push, reset, clean, or discard work.
-- When ready to hand back, run: bin/ak crew-report $slug "summary, changed files, checks, blockers" so the primary gets a push notification.
+- When ready to hand back, run: $ak_cmd crew-report $slug "summary, changed files, checks, blockers" so the primary gets a push notification.
 - Report changed files, checks, and blockers to the primary agent.
 EOF
   cat >"$crew_dir/report.template.md" <<EOF
@@ -347,6 +429,7 @@ slug=$slug
 repo=$root
 worktree=$worktree
 branch=$branch
+vcs=$vcs
 brief=$crew_dir/brief.md
 herdr_session=$HERDR_CREATED_SESSION
 herdr_workspace=$HERDR_CREATED_WORKSPACE
@@ -356,7 +439,7 @@ command=$cmd
 created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
   if [ -n "${HERDR_CREATED_PANE:-}" ]; then
-    herdr pane send-text "$HERDR_CREATED_PANE" "Read $crew_dir/brief.md and begin. Report status in chat when ready." --session "$HERDR_CREATED_SESSION" >/dev/null 2>&1 || true
+    herdr pane send-text "$HERDR_CREATED_PANE" "Read $crew_dir/brief.md and begin. When ready, report with: $ak_cmd crew-report $slug \"summary, changed files, checks, blockers\"" --session "$HERDR_CREATED_SESSION" >/dev/null 2>&1 || true
     herdr pane send-keys "$HERDR_CREATED_PANE" enter --session "$HERDR_CREATED_SESSION" >/dev/null 2>&1 || true
   fi
   printf 'crew spawned: %s\n' "$slug"
@@ -466,6 +549,8 @@ crew_finish() {
   slug=$(slugify "$1")
   shift
   root=$(repo_root)
+  vcs=$(repo_vcs)
+  ak_cmd=$(self_path)
   meta=$(crew_meta_path "$slug")
   [ -f "$meta" ] || { printf 'unknown crew: %s\n' "$slug" >&2; exit 1; }
   worktree=$(crew_field "$slug" worktree)
@@ -482,19 +567,28 @@ $*
 EOF
   elif [ ! -f "$report" ]; then
     printf 'report missing for crew: %s\n' "$slug" >&2
-    printf 'write one with: bin/ak crew-report %s "summary..."\n' "$slug" >&2
+    printf 'write one with: %s crew-report %s "summary..."\n' "$ak_cmd" "$slug" >&2
     exit 1
   fi
   if ! crew_worktree_clean "$worktree"; then
     printf 'crew worktree is dirty; review before finishing: %s\n' "$worktree" >&2
-    git -C "$worktree" status --short >&2 || true
+    if [ "$vcs" = jj ]; then
+      jj -R "$worktree" status --no-pager >&2 || true
+    else
+      git -C "$worktree" status --short >&2 || true
+    fi
     exit 1
   fi
   if command -v herdr >/dev/null 2>&1 && [ -n "$tab" ] && [ -n "$session" ]; then
     herdr tab close "$tab" --session "$session" >/dev/null 2>&1 || { printf 'could not close Herdr tab for %s\n' "$slug" >&2; exit 1; }
   fi
-  git -C "$root" worktree remove "$worktree" >/dev/null 2>&1 || { printf 'could not remove worktree %s\n' "$worktree" >&2; exit 1; }
-  git -C "$root" branch -D "$branch" >/dev/null 2>&1 || true
+  if [ "$vcs" = jj ]; then
+    jj -R "$root" workspace forget "$slug" >/dev/null 2>&1 || { printf 'could not forget jj workspace %s\n' "$slug" >&2; exit 1; }
+    rm -rf "$worktree" || { printf 'could not remove workspace directory %s\n' "$worktree" >&2; exit 1; }
+  else
+    git -C "$root" worktree remove "$worktree" >/dev/null 2>&1 || { printf 'could not remove worktree %s\n' "$worktree" >&2; exit 1; }
+    git -C "$root" branch -D "$branch" >/dev/null 2>&1 || true
+  fi
   printf 'state=done\nfinished_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$(dirname "$meta")/state"
   printf 'crew finished: %s\n' "$slug"
   printf 'report: %s\n' "$report"
