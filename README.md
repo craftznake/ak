@@ -21,6 +21,7 @@ This is intentionally a **small Firstmate-inspired workflow**. It keeps the part
 - `bin/ak` - small helper for setup, plans, Lavish, Herdr tabs, and crew lifecycle
 - `docs/deterministic-workflow.md` - workflow contract
 - `docs/herdr-workflow.md` - Herdr usage notes
+- `docs/primary-agent-model.md` - firstmate-style primary delegation behavior
 - `docs/supervision-model.md` - crew supervision commands and loop
 - `docs/reporting-model.md` - push reporting from crews to the primary
 - `docs/safety-model.md` - cleanup and isolation rules

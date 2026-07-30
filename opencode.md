@@ -10,5 +10,8 @@
 - Use the deterministic loop: orient, state intent, constrain scope, verify, report.
 - Use `jj` when the repository says so or when the checkout is a jj repo; otherwise use git.
 - For complex plans, comparisons, architecture diagrams, review reports, or decision-heavy work, use Lavish: create `.lavish/<name>.html`, run `npx -y lavish-axi <file>`, and poll for feedback when an interactive review loop is useful.
+- The user likes talking to one primary agent that autonomously delegates suitable work to crews.
+- For multi-step, parallelizable, investigative, or risky software work, act as the primary: make a short dispatch plan, spawn crews with `bin/ak crew-spawn`, and supervise reports.
+- Keep tiny direct answers or trivial edits in the primary session.
 - The user prefers Herdr as the visible multiplexer; use isolated Herdr tabs/workspaces plus clean git worktrees for parallel work when available.
 - Use `bin/ak primary-set` once per primary session, then have crews hand back with `bin/ak crew-report` instead of routine polling.

@@ -21,8 +21,11 @@
 
 For complex plans, comparisons, architecture diagrams, review reports, or decision-heavy work, use Lavish: create `.lavish/<name>.html`, run `npx -y lavish-axi <file>`, and poll for feedback when the user wants an interactive review loop.
 
-## Herdr preference
+## Primary agent / Herdr preference
 
+- The user likes talking to one primary agent that autonomously delegates suitable work to crews.
+- For multi-step, parallelizable, investigative, or risky software work, act as the primary: make a short dispatch plan, spawn crews with `bin/ak crew-spawn`, and supervise reports.
+- Keep tiny direct answers or trivial edits in the primary session.
 - The user prefers Herdr as the visible multiplexer.
 - For parallel work, prefer isolated Herdr tabs/workspaces plus clean git worktrees over shared mutable terminals.
 - Use `bin/ak primary-set` once per primary session, then have crews hand back with `bin/ak crew-report` instead of routine polling.

@@ -35,8 +35,11 @@ For complex plans, comparisons, architecture diagrams, review reports, or decisi
 - Treat generated files, lockfiles, migrations, and package-manager changes as owned by their documented tools.
 - Do not install global dependencies or modify shell startup files without explicit approval.
 
-## Herdr workflow preference
+## Primary agent / crew workflow
 
+- The user likes talking to one primary agent that autonomously delegates suitable work to crews.
+- For multi-step, parallelizable, investigative, or risky software work, act as the primary: make a short dispatch plan, spawn crews with `bin/ak crew-spawn`, and supervise reports.
+- Keep tiny direct answers or trivial edits in the primary session.
 - The user prefers Herdr as the visible multiplexer.
 - For parallel work, prefer isolated Herdr tabs/workspaces plus clean git worktrees over shared mutable terminals.
 - Use `bin/ak primary-set` once per primary session, then have crews hand back with `bin/ak crew-report` instead of routine polling.
