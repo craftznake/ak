@@ -81,13 +81,14 @@ esac'
   esac
 }
 
-mkdir -p "$HOME/.config/opencode" "$HOME/.claude/skills" "$local_bin"
+mkdir -p "$HOME/.config/opencode" "$HOME/.claude/skills" "$HOME/.pi/agent/extensions" "$local_bin"
 
 install_symlink "$repo_dir/claude.md" "$HOME/.claude/CLAUDE.md"
 install_symlink "$repo_dir/shared.md" "$HOME/.claude/shared.md"
 
 install_symlink "$repo_dir/pi.md" "$HOME/.pi/agent/AGENTS.md"
 install_symlink "$repo_dir/shared.md" "$HOME/.pi/agent/shared.md"
+install_symlink "$repo_dir/extensions/pi/ak-context-file-imports.ts" "$HOME/.pi/agent/extensions/ak-context-file-imports.ts"
 
 install_symlink "$repo_dir/bin/ak" "$local_bin/ak"
 ensure_path_in_shell "$local_bin"

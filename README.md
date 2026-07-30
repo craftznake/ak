@@ -18,6 +18,7 @@ This is intentionally a **small Firstmate-inspired workflow**. It keeps the part
 - `claude.md` - Claude Code entrypoint
 - `pi.md` - Pi entrypoint
 - `opencode.md` - opencode entrypoint
+- `extensions/pi/ak-context-file-imports.ts` - Pi extension that expands `@*.md` imports from loaded context files into the system prompt
 - `bin/ak` - small helper for setup, plans, Lavish, Herdr tabs, and crew lifecycle
 - `docs/deterministic-workflow.md` - workflow contract
 - `docs/herdr-workflow.md` - Herdr usage notes
@@ -40,6 +41,7 @@ The script:
 - symlinks `claude.md` to `~/.claude/CLAUDE.md`
 - symlinks `pi.md` to `~/.pi/agent/AGENTS.md`
 - symlinks `shared.md` beside those entrypoints for relative imports
+- symlinks the Pi `ak-context-file-imports` extension to expand `@shared.md`-style context imports
 - symlinks `bin/ak` to `~/.local/bin/ak`
 - adds an idempotent `~/.local/bin` PATH block to the active shell's startup file when that file is writable
 - creates an opencode config only when one does not already exist

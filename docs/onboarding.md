@@ -21,6 +21,7 @@ What `install.sh` does:
 - symlinks `shared.md` beside Claude's entrypoint for relative imports
 - symlinks `pi.md` to `~/.pi/agent/AGENTS.md`
 - symlinks `shared.md` beside Pi's entrypoint for relative imports
+- symlinks the Pi `ak-context-file-imports` extension to `~/.pi/agent/extensions/ak-context-file-imports.ts` so `@shared.md`-style imports are expanded into Pi's system prompt
 - symlinks `bin/ak` to `~/.local/bin/ak`
 - adds an idempotent `~/.local/bin` PATH block to the active shell's startup file when that file is writable
 - creates an opencode config only if one does not already exist
