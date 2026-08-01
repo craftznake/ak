@@ -19,7 +19,7 @@ Use this loop for non-trivial work:
 4. **Verify** - run the narrowest meaningful checks first, then broader project checks when practical.
 5. **Report** - summarize files changed, checks run, and any residual risk or follow-up.
 
-For complex plans, comparisons, architecture diagrams, review reports, or decision-heavy work, use Lavish: create a local HTML artifact under `.lavish/`, run `npx -y lavish-axi <file>`, and poll for feedback when the user wants an interactive review loop.
+For complex plans, comparisons, architecture diagrams, review reports, or decision-heavy work, use Lavish: create a local HTML artifact under `.lavish/`, run `npx -y lavish-axi <file>`, and poll for feedback when the user wants an interactive review loop. When a Lavish session is opened, do not finish the conversational response early; run the foreground `lavish-axi poll <file>` loop and wait for the user's Lavish feedback or explicit session end before summarizing.
 
 ## Version control
 
