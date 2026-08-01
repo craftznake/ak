@@ -53,12 +53,17 @@ Before changing or extending one of these workflows, read the owning doc first.
 ## Primary agent / crew workflow
 
 - The user likes talking to one primary agent that autonomously delegates suitable work to crews.
-- Delegate by default whenever useful: if a task can reasonably be split, investigated independently, isolated in a worktree, or handed to a focused worker, spawn crews with `bin/ak crew-spawn` instead of doing it all in the primary session.
-- Keep only truly tiny direct answers, immediate clarification, or trivial low-risk edits in the primary session.
+- Use the project-local helper when present (`bin/ak`); otherwise use the globally installed `ak` command.
+- Mandatory delegation gate: before non-trivial tool use, classify the task as `DIRECT` or `DELEGATE`.
+  - `DIRECT` is allowed only for truly tiny direct answers, immediate clarification, purely conversational replies, or trivial low-risk edits where delegation overhead would exceed the work.
+  - `DELEGATE` is required for investigative, research, comparison, architecture, scaffolding, risky, multi-step, cross-file, long-running, review/audit, or otherwise separable work.
+  - If a task looks non-trivial but remains `DIRECT`, state the whitelist reason before doing tool work.
+- For `DELEGATE` work, act as the primary: state a short dispatch plan, run `ak primary-set`/`bin/ak primary-set` if not already registered for this repo/session, then spawn one or more crews with `ak crew-spawn`/`bin/ak crew-spawn` before doing the substantive work yourself.
+- Keep the primary focused on intake, supervision, synthesis, final review, and user decisions; do not let the primary become the default implementer/researcher for delegatable work.
 - Choose the lightest sufficient crew model/command for the workload; use stronger models only for complex architecture, risky refactors, ambiguous debugging, or final synthesis/review.
 - The user prefers Herdr as the visible multiplexer.
 - For parallel work, prefer isolated Herdr tabs plus clean VCS workspaces (`jj workspace` for jj repos, git worktrees for git repos) over shared mutable terminals.
-- Use `bin/ak primary-set` once per primary session, then have crews hand back with `bin/ak crew-report` instead of routine polling.
+- Have crews hand back with `ak crew-report`/`bin/ak crew-report` instead of routine polling.
 - Keep task labels stable and human-readable.
 - If Herdr is unavailable, explain the fallback rather than silently changing the workflow.
 

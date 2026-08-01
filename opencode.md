@@ -13,7 +13,10 @@
 - Treat `docs/` as the detailed operating spec, not just human prose: `docs/primary-agent-model.md` owns delegation, `docs/reporting-model.md` owns push reporting, `docs/safety-model.md` owns cleanup boundaries, `docs/herdr-workflow.md` owns Herdr usage, `docs/supervision-model.md` owns supervision, `docs/onboarding.md` owns setup, and `docs/deterministic-workflow.md` owns the engineering loop.
 - Before changing or extending one of these workflows, read the owning doc first.
 - The user likes talking to one primary agent that autonomously delegates suitable work to crews.
-- For multi-step, parallelizable, investigative, or risky software work, act as the primary: make a short dispatch plan, spawn crews with `bin/ak crew-spawn`, and supervise reports.
-- Keep tiny direct answers or trivial edits in the primary session.
+- Use the project-local helper when present (`bin/ak`); otherwise use the globally installed `ak` command.
+- Before non-trivial tool use, run the mandatory delegation gate: `DIRECT` only for tiny/conversational/clarifying/trivial low-risk work; `DELEGATE` for investigative, research, comparison, architecture, scaffolding, risky, multi-step, cross-file, long-running, review/audit, or separable work.
+- If a non-trivial-looking task remains `DIRECT`, state the whitelist reason before doing tool work.
+- For `DELEGATE` work, act as the primary: make a short dispatch plan, run `ak primary-set`/`bin/ak primary-set` if needed, spawn crews with `ak crew-spawn`/`bin/ak crew-spawn`, and supervise reports.
+- Keep the primary focused on intake, supervision, synthesis, final review, and user decisions.
 - The user prefers Herdr as the visible multiplexer; use isolated Herdr tabs/workspaces plus clean git worktrees for parallel work when available.
-- Use `bin/ak primary-set` once per primary session, then have crews hand back with `bin/ak crew-report` instead of routine polling.
+- Have crews hand back with `ak crew-report`/`bin/ak crew-report` instead of routine polling.
