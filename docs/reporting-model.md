@@ -10,7 +10,7 @@ Run this once from the primary agent's Herdr tab:
 bin/ak primary-set
 ```
 
-This records the primary Herdr target in `.agent-kit/primary`. By default crew reports wake the primary by sending the report message into the registered agent/pane. This avoids a blocking wait loop while still letting crews trigger the next primary-agent turn.
+This records the primary Herdr target in `.agent-kit/primary`. By default crew reports wake the primary by sending the report message into the registered agent/pane. This avoids a blocking wait loop while still letting crews trigger the next primary-agent turn. `primary-set` validates explicit Herdr targets and refuses known crew slugs/panes so a crew cannot accidentally register itself as the primary.
 
 If you want inbox/notification-only behavior, opt out:
 

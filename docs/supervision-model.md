@@ -18,7 +18,7 @@ The primary agent supervises crews instead of babysitting every terminal manuall
 
 ## Recommended loop
 
-- register the primary once with `bin/ak primary-set`
+- register the primary once from the primary Herdr pane with `bin/ak primary-set`
 - spawn crew
 - let it work in its own worktree
 - proactively ask for spend snapshots with `bin/ak crew-cost-prompt` when cost matters
@@ -31,7 +31,7 @@ The primary agent supervises crews instead of babysitting every terminal manuall
 
 ## Push reporting
 
-`crew-report` writes the durable report, appends an inbox entry, marks the crew as reported, shows a Herdr notification when available, and wakes the registered primary by sending the report message into its Herdr target. This avoids both routine polling and a blocking wait loop while keeping the primary in control of final review and cleanup.
+`crew-report` writes the durable report, appends an inbox entry, marks the crew as reported, shows a Herdr notification when available, and wakes the registered primary by sending the report message into its Herdr target. This avoids both routine polling and a blocking wait loop while keeping the primary in control of final review and cleanup. `primary-set` refuses explicit targets that are not found in Herdr and refuses known crew slugs/panes.
 
 Use `bin/ak primary-set --notify-only` or `AK_NO_WAKE=1 bin/ak crew-report ...` when you want inbox/notification-only reporting.
 

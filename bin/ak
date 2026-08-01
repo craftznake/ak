@@ -252,6 +252,21 @@ primary_show() {
   fi
 }
 
+is_registered_crew_target() {
+  target=$1
+  base=$(crew_base)
+  [ -d "$base" ] || return 1
+  find "$base" -mindepth 2 -maxdepth 2 -name meta -type f 2>/dev/null | while IFS= read -r meta; do
+    slug=$(basename "$(dirname "$meta")")
+    pane=$(awk -F= '$1=="herdr_pane" {print substr($0, index($0,"=")+1); exit}' "$meta")
+    tab=$(awk -F= '$1=="herdr_tab" {print substr($0, index($0,"=")+1); exit}' "$meta")
+    if [ "$target" = "$slug" ] || { [ -n "$pane" ] && [ "$target" = "$pane" ]; } || { [ -n "$tab" ] && [ "$target" = "$tab" ]; }; then
+      printf '%s\n' "$slug"
+      exit 0
+    fi
+  done | grep -m 1 . >/dev/null 2>&1
+}
+
 primary_set() {
   session=${AK_HERDR_SESSION:-default}
   inject=1
@@ -263,23 +278,36 @@ primary_set() {
     shift
   fi
   target=${1:-}
+  explicit_target=0
   if [ -z "$target" ]; then
     info=$(herdr pane current --current --session "$session" 2>/dev/null) || {
       printf 'could not inspect current Herdr pane; pass an explicit target\n' >&2
       exit 1
     }
-    target=$(printf '%s' "$info" | jq -r '.result.pane.pane_id // .pane.pane_id // .pane_id // empty' 2>/dev/null)
-    agent=$(printf '%s' "$info" | jq -r '.result.pane.agent // .pane.agent // empty' 2>/dev/null)
-    tab=$(printf '%s' "$info" | jq -r '.result.pane.tab_id // .pane.tab_id // empty' 2>/dev/null)
-    workspace=$(printf '%s' "$info" | jq -r '.result.pane.workspace_id // .pane.workspace_id // empty' 2>/dev/null)
-    cwd=$(printf '%s' "$info" | jq -r '.result.pane.cwd // .pane.cwd // empty' 2>/dev/null)
   else
-    agent=$(herdr agent get "$target" --session "$session" 2>/dev/null | jq -r '.result.agent.agent // .agent.agent // .result.agent.name // empty' 2>/dev/null || printf '')
-    tab=''
-    workspace=''
-    cwd=''
+    explicit_target=1
+    if is_registered_crew_target "$target"; then
+      printf 'refusing to register crew target as primary: %s\n' "$target" >&2
+      printf 'run primary-set from the actual primary Herdr pane, or pass its pane id explicitly\n' >&2
+      exit 1
+    fi
+    info=$(herdr pane get "$target" --session "$session" 2>/dev/null || herdr agent get "$target" --session "$session" 2>/dev/null || true)
+    [ -n "$info" ] || {
+      printf 'primary target not found in Herdr session %s: %s\n' "$session" "$target" >&2
+      exit 1
+    }
   fi
+  target=$(printf '%s' "$info" | jq -r '.result.pane.pane_id // .pane.pane_id // .pane_id // .result.agent.pane_id // .agent.pane_id // empty' 2>/dev/null)
+  agent=$(printf '%s' "$info" | jq -r '.result.pane.agent // .pane.agent // .result.agent.agent // .agent.agent // empty' 2>/dev/null)
+  tab=$(printf '%s' "$info" | jq -r '.result.pane.tab_id // .pane.tab_id // .result.agent.tab_id // .agent.tab_id // empty' 2>/dev/null)
+  workspace=$(printf '%s' "$info" | jq -r '.result.pane.workspace_id // .pane.workspace_id // .result.agent.workspace_id // .agent.workspace_id // empty' 2>/dev/null)
+  cwd=$(printf '%s' "$info" | jq -r '.result.pane.cwd // .pane.cwd // .result.agent.cwd // .agent.cwd // empty' 2>/dev/null)
   [ -n "$target" ] || { printf 'could not determine primary target\n' >&2; exit 1; }
+  if [ "$explicit_target" = 0 ] && is_registered_crew_target "$target"; then
+    printf 'refusing to register crew pane as primary: %s\n' "$target" >&2
+    printf 'switch to the actual primary Herdr pane and run primary-set there\n' >&2
+    exit 1
+  fi
   ensure_runtime_ignored
   mkdir -p "$(agentkit_dir)"
   cat >"$(primary_path)" <<EOF
