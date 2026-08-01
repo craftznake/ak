@@ -1,22 +1,5 @@
-# opencode instructions
+@shared.md
 
-- Read `shared.md` in this repository as the source of truth when working here.
-- Act as a deterministic senior software-engineering assistant, not an autonomous cowboy.
-- Prefer the smallest correct change; preserve user and unowned edits.
-- Read project-local instructions first: `AGENTS.md`, `CLAUDE.md`, harness configs, package docs, and workflow notes.
-- If the target repo, file, or setup is ambiguous, ask one short question before changing code.
-- When a task is diagnostic, identify the root cause before proposing or applying changes.
-- Avoid destructive commands unless the user explicitly requests them.
-- Use the deterministic loop: orient, state intent, constrain scope, verify, report.
-- Use `jj` when the repository says so or when the checkout is a jj repo; otherwise use git.
-- For complex plans, comparisons, architecture diagrams, review reports, or decision-heavy work, use Lavish: create `.lavish/<name>.html`, run `npx -y lavish-axi <file>`, and poll for feedback when an interactive review loop is useful.
-- Treat `docs/` as the detailed operating spec, not just human prose: `docs/primary-agent-model.md` owns delegation, `docs/reporting-model.md` owns push reporting, `docs/safety-model.md` owns cleanup boundaries, `docs/herdr-workflow.md` owns Herdr usage, `docs/supervision-model.md` owns supervision, `docs/onboarding.md` owns setup, and `docs/deterministic-workflow.md` owns the engineering loop.
-- Before changing or extending one of these workflows, read the owning doc first.
-- The user likes talking to one primary agent that autonomously delegates suitable work to crews.
-- Use the project-local helper when present (`bin/ak`); otherwise use the globally installed `ak` command.
-- Before non-trivial tool use, run the mandatory delegation gate: `DIRECT` only for tiny/conversational/clarifying/trivial low-risk work; `DELEGATE` for investigative, research, comparison, architecture, scaffolding, risky, multi-step, cross-file, long-running, review/audit, or separable work.
-- If a non-trivial-looking task remains `DIRECT`, state the whitelist reason before doing tool work.
-- For `DELEGATE` work, act as the primary: make a short dispatch plan, run `ak primary-set`/`bin/ak primary-set` if needed, spawn crews with `ak crew-spawn`/`bin/ak crew-spawn`, and supervise reports.
-- Keep the primary focused on intake, supervision, synthesis, final review, and user decisions.
-- The user prefers Herdr as the visible multiplexer; use isolated Herdr tabs/workspaces plus clean git worktrees for parallel work when available.
-- Have crews hand back with `ak crew-report`/`bin/ak crew-report` instead of routine polling.
+## opencode
+
+This file exists so opencode can import the shared instructions from one portable source.
