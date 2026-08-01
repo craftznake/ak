@@ -98,17 +98,47 @@ if [ -d "$repo_dir/.agents/skills/lavish" ]; then
 fi
 
 opencode_config="$HOME/.config/opencode/opencode.json"
+opencode_instruction="$repo_dir/opencode.md"
 if [ ! -f "$opencode_config" ]; then
   cat >"$opencode_config" <<EOF
 {
   "\$schema": "https://opencode.ai/config.json",
-  "instructions": ["$repo_dir/opencode.md"]
+  "instructions": ["$opencode_instruction"]
 }
 EOF
   printf 'Created %s\n' "$opencode_config"
 else
-  printf 'Skipped existing %s\n' "$opencode_config"
-  printf 'Add this instruction path manually if it is missing:\n%s\n' "$repo_dir/opencode.md"
+  if python3 - "$opencode_config" "$opencode_instruction" <<'PY'
+import json
+import pathlib
+import sys
+
+config_path = pathlib.Path(sys.argv[1])
+instruction_path = sys.argv[2]
+
+try:
+    data = json.loads(config_path.read_text())
+except Exception:
+    raise SystemExit(1)
+
+instructions = data.get('instructions')
+if instructions is None:
+    instructions = []
+elif not isinstance(instructions, list):
+    raise SystemExit(1)
+
+if instruction_path not in instructions:
+    instructions.append(instruction_path)
+    data['instructions'] = instructions
+    config_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n')
+    print('updated')
+PY
+  then
+    printf 'Updated %s with %s\n' "$opencode_config" "$opencode_instruction"
+  else
+    printf 'Skipped %s because it is not a JSON config with an instructions array.\n' "$opencode_config"
+    printf 'Add this instruction path manually if it is missing:\n%s\n' "$opencode_instruction"
+  fi
 fi
 
 printf 'Installed agent-kit symlinks. Restart agent harnesses and any shell that did not already have ~/.local/bin on PATH.\n'

@@ -24,12 +24,12 @@ What `install.sh` does:
 - symlinks the Pi `ak-context-file-imports` extension to `~/.pi/agent/extensions/ak-context-file-imports.ts` so `@shared.md`-style imports are expanded into Pi's system prompt
 - symlinks `bin/ak` to `~/.local/bin/ak`
 - adds an idempotent `~/.local/bin` PATH block to the active shell's startup file when that file is writable
-- creates an opencode config only if one does not already exist
+- creates or updates an opencode config so it includes this repo's `opencode.md` in `instructions`
 - symlinks the local Lavish skill into `~/.claude/skills/lavish`
 
 Existing non-symlink install targets are moved to `*.agent-kit-backup.*` before the symlink is installed.
 
-For opencode with an existing config, add this repo's `opencode.md` to its `instructions` array manually.
+For opencode with an existing config, `install.sh` will merge this repo's `opencode.md` into its `instructions` array while preserving the rest of the config.
 
 ## Daily primary-agent startup
 

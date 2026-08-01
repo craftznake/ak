@@ -44,12 +44,12 @@ The script:
 - symlinks the Pi `ak-context-file-imports` extension to expand `@shared.md`-style context imports
 - symlinks `bin/ak` to `~/.local/bin/ak`
 - adds an idempotent `~/.local/bin` PATH block to the active shell's startup file when that file is writable
-- creates an opencode config only when one does not already exist
+- creates or updates an opencode config so it includes this repo's `opencode.md` in `instructions`
 - symlinks the local Lavish skill into `~/.claude/skills/lavish`
 
 Existing non-symlink install targets are moved to `*.agent-kit-backup.*` before the symlink is installed.
 
-If opencode already has a config, add `opencode.md` manually to preserve existing providers, plugins, and permissions.
+If opencode already has a config, `install.sh` will add this repo's `opencode.md` to its `instructions` array while preserving existing providers, plugins, and permissions.
 
 ## Onboarding
 
