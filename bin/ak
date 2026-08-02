@@ -776,8 +776,28 @@ EOF
     jj_abandon_empty_change "$root" "$jj_change" "agent-kit crew: $slug"
     rm -rf "$worktree" || { printf 'could not remove workspace directory %s\n' "$worktree" >&2; exit 1; }
   else
+    git_commits=
+    if git -C "$root" show-ref --verify --quiet "refs/heads/$branch"; then
+      others=$(git -C "$root" for-each-ref --format='%(refname)' | grep -v "^refs/heads/$branch$" || true)
+      git_commits=$(git -C "$root" rev-list "$branch" --not $others 2>/dev/null || true)
+    fi
     git -C "$root" worktree remove "$worktree" >/dev/null 2>&1 || { printf 'could not remove worktree %s\n' "$worktree" >&2; exit 1; }
     git -C "$root" branch -D "$branch" >/dev/null 2>&1 || true
+    if [ -n "$git_commits" ]; then
+      unreachable=$(git -C "$root" fsck --unreachable --no-reflogs 2>/dev/null | awk '$2=="commit"{print $3}' | sort -u)
+      prune_ok=1
+      for c in $git_commits; do
+        if ! printf '%s\n' "$unreachable" | grep -qxF "$c"; then
+          printf 'warning: crew commit still referenced elsewhere; skipping prune: %s\n' "$c" >&2
+          prune_ok=0
+          break
+        fi
+      done
+      if [ "$prune_ok" = 1 ]; then
+        git -C "$root" prune --expire=now >/dev/null 2>&1 || true
+        printf 'pruned crew commits: %s\n' "$git_commits"
+      fi
+    fi
   fi
   printf 'state=done\nfinished_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$(dirname "$meta")/state"
   printf 'crew finished: %s\n' "$slug"

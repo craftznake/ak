@@ -23,4 +23,12 @@ If the recorded jj change is non-empty or has an unexpected description, `crew-f
 
 ### git
 
-For git repos, `crew-spawn` creates a git worktree on `ak/<slug>`. When finishing a clean crew, `crew-finish` removes the git worktree and deletes that local branch.
+For git repos, `crew-spawn` creates a git worktree on `ak/<slug>`. When finishing a clean crew, `crew-finish`:
+
+1. records the commits reachable only from `ak/<slug>` (not from any other ref);
+2. removes the git worktree;
+3. deletes the local branch `ak/<slug>`;
+4. verifies the recorded commits are now unreachable; and
+5. prunes them with `git prune --expire=now`, so the crew's commits are removed together with the branch and worktree.
+
+If any recorded commit is still reachable from another ref (for example the branch was merged), `crew-finish` skips pruning and leaves the commits for normal `git gc`. `git prune --expire=now` removes all unreachable objects in the repo, so it is only run after the crew's commits are verified unreachable.

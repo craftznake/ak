@@ -81,6 +81,8 @@ Finish only after reviewing the report and confirming the worktree is clean:
 bin/ak crew-finish <slug>
 ```
 
+`crew-finish` also removes every crew artifact: the jj/git worktree, the empty jj workspace change, and for git repos the `ak/<slug>` branch together with the commits created on it.
+
 ## Brief template
 
 A good crew brief includes:
