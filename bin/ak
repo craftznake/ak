@@ -534,11 +534,11 @@ EOF
     fi
     if ! herdr pane send-text "$HERDR_CREATED_PANE" "$startup_prompt" --session "$HERDR_CREATED_SESSION" >/dev/null 2>&1; then
       printf 'warning: could not send startup prompt to crew pane %s\n' "$HERDR_CREATED_PANE" >&2
-    elif ! herdr pane send-keys "$HERDR_CREATED_PANE" Enter --session "$HERDR_CREATED_SESSION" >/dev/null 2>&1; then
+    fi
+
+    sleep "${AK_CREW_SUBMIT_DELAY:-0.5}"
+    if ! herdr pane send-keys "$HERDR_CREATED_PANE" Enter --session "$HERDR_CREATED_SESSION" >/dev/null 2>&1; then
       printf 'warning: sent startup prompt but could not submit it in crew pane %s\n' "$HERDR_CREATED_PANE" >&2
-    else
-      sleep "${AK_CREW_SUBMIT_DELAY:-0.5}"
-      herdr pane send-keys "$HERDR_CREATED_PANE" Enter --session "$HERDR_CREATED_SESSION" >/dev/null 2>&1 || true
     fi
   fi
   printf 'crew spawned: %s\n' "$slug"
