@@ -42,6 +42,8 @@ That command:
 - shows a Herdr notification when available (`AK_NO_NOTIFY=1` disables it)
 - wakes the registered primary agent by sending the summary into its Herdr target (`AK_NO_WAKE=1` disables this per command)
 
+The wake uses `herdr agent prompt <target> <message>` (fire-and-forget, no `--wait`), which atomically submits text and an encoded Enter while honoring the pane's live bracketed-paste mode. This is reliable where raw `pane send-text` + `pane send-keys enter` was not: the Enter can no longer land without actually submitting. If the registered target does not resolve to a recognized Herdr agent (e.g. a plain shell pane), `primary_notify` falls back to the raw `pane send-text` + `pane send-keys enter` path as a last resort.
+
 If no primary is registered, the command still writes the report and inbox entry; it just cannot wake a primary session.
 
 ## Cleanup remains separate

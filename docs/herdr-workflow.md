@@ -41,6 +41,12 @@ bin/ak crew-finish fix-login
 
 The wrapper refuses Herdr operations when `herdr` is missing; it does not silently fall back to tmux or another multiplexer.
 
+## Crew startup handoff
+
+`crew-spawn` starts the crew's harness with `herdr agent start <name> --kind <kind> --pane <id>` whenever `AK_CREW_COMMAND` (default `pi`) resolves to a recognized Herdr agent kind (`pi`, `claude`, `codex`, `gemini`, `cursor`, `devin`, `agy`, `cline`, `omp`, `mastracode`, `opencode`, `copilot`, `kimi`, `kiro`, `droid`, `amp`, `grok`, `hermes`, `kilo`, `qodercli`, `maki`). `agent start` only returns once Herdr detects the agent and it is ready for input, so no readiness guessing is needed. The startup prompt (read the brief and begin) is then submitted with `herdr agent prompt <target> "<prompt>" --wait --timeout "$AK_CREW_STARTUP_TIMEOUT"` (default 120000ms), which atomically submits text and an encoded Enter honoring the pane's live bracketed-paste mode. A timeout only logs a warning; it does not fail `crew-spawn`, since the crew may simply be slow to start or already working.
+
+For an `AK_CREW_COMMAND` that is an arbitrary command (not a recognized agent kind), `crew-spawn` keeps using `herdr pane run` as before, then polls `herdr agent get` briefly for Herdr's own agent auto-detection before submitting the startup prompt (via `herdr agent prompt` if an agent is detected, otherwise via raw `herdr pane send-text` + `herdr pane send-keys enter` as a last resort).
+
 ## Safety boundaries
 
 - Herdr is presentation/coordination, not authority.
