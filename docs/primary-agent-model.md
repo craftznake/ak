@@ -74,3 +74,7 @@ Primary: Login fix is ready; CI scout found cache misses. Here are the decisions
 ```
 
 The primary should hide routine mechanics but never hide risk, blockers, or uncertainty.
+
+## Mechanical enforcement (pi)
+
+The delegation gate above is a policy, enforced today mostly by the agent re-reading and self-policing it each turn. For the pi harness, `extensions/pi/delegation-guard.ts` adds a lightweight mechanical nudge/escalation on top of it: it counts investigative tool calls since the last `bin/ak crew-spawn`-shaped command or stated `DIRECT` justification, and injects reminder messages (then an optional confirm prompt) as that count grows, without blocking any tool call. See `docs/delegation-guard.md` for thresholds, config, and how to disable it. It does not change the policy in this document; it only makes it harder to silently ignore inside a pi session.
