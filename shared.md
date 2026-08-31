@@ -13,7 +13,7 @@
 
 Use this loop for non-trivial work:
 
-1. **Orient** - inspect repo state, instructions, dependency files, and relevant source before deciding.
+1. **Orient** - inspect repo state, instructions, and dependency files just enough to classify `DIRECT` vs `DELEGATE`. This is a scope check, not the investigation itself: confirm repo/branch, locate the relevant files/services, and stop. If answering or root-causing the task would require reading multiple source files, tracing history across files or repos, reproducing a failure, or building a hypothesis chain, that work *is* the delegated task - run the delegation gate and spawn a crew instead of continuing to dig personally. A good tripwire: once orientation goes past a handful of exploratory reads/greps without yet reaching a DIRECT/DELEGATE decision, treat that as a signal to delegate immediately rather than pressing on.
 2. **State intent** - give a short plan or checklist when the change spans multiple files, changes behavior, or has risk.
 3. **Constrain scope** - change only files required for the task; do not opportunistically refactor.
 4. **Verify** - run the narrowest meaningful checks first, then broader project checks when practical.
@@ -58,6 +58,7 @@ Before changing or extending one of these workflows, read the owning doc first.
   - `DIRECT` is allowed only for truly tiny direct answers, immediate clarification, purely conversational replies, or trivial low-risk edits where delegation overhead would exceed the work.
   - `DELEGATE` is required for investigative, research, comparison, architecture, scaffolding, risky, multi-step, cross-file, long-running, review/audit, or otherwise separable work.
   - If a task looks non-trivial but remains `DIRECT`, state the whitelist reason before doing tool work.
+  - Long-running investigation (root-causing a crash/bug, tracing behavior across multiple files or repos, comparing versions, reproducing a failure) is always `DELEGATE`, even if the primary already started poking around. Do not let "just a bit more digging" turn into personally doing the crew's job - the moment orientation turns into the actual investigation, stop and spawn a crew with what's been learned so far as context in the brief.
 - For `DELEGATE` work, act as the primary: state a short dispatch plan, run `ak primary-set`/`bin/ak primary-set` if not already registered for this repo/session, then spawn one or more crews with `ak crew-spawn`/`bin/ak crew-spawn` before doing the substantive work yourself.
 - Keep the primary focused on intake, supervision, synthesis, final review, and user decisions; do not let the primary become the default implementer/researcher for delegatable work.
 - Choose the lightest sufficient crew model/command for the workload; use stronger models only for complex architecture, risky refactors, ambiguous debugging, or final synthesis/review.
@@ -65,7 +66,6 @@ Before changing or extending one of these workflows, read the owning doc first.
 - For parallel work, prefer isolated Herdr tabs plus clean VCS workspaces (`jj workspace` for jj repos, git worktrees for git repos) over shared mutable terminals.
 - Have crews hand back with `ak crew-report`/`bin/ak crew-report` instead of routine polling.
 - Keep task labels stable and human-readable.
-- If Herdr is unavailable, explain the fallback rather than silently changing the workflow.
 
 ## Communication style
 

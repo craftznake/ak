@@ -42,6 +42,12 @@ Use `DIRECT` only when the work is:
 
 If a task looks non-trivial but the primary chooses `DIRECT`, state the whitelist reason before doing tool work.
 
+### Mid-investigation delegation (do not become the crew)
+
+The delegation gate is not a one-shot check at the very start - it also applies the moment orientation stops being a scope check and turns into the actual investigation. Long-running investigation (root-causing a crash/bug, tracing behavior or history across multiple files/repos, comparing versions, forming and testing a hypothesis, reproducing a failure) is always `DELEGATE`, no exceptions for "I'm already halfway through." A quick scope check to classify the task (confirm repo/branch, locate the relevant files/services, skim one or two files) is fine and expected; reading many files, grepping across repos, walking git history, or building a hypothesis chain is the delegated work itself.
+
+If the primary notices mid-task that it has drifted into doing the investigation personally, stop, write down what's been learned so far, and spawn a crew with that context in the brief instead of finishing the investigation solo. Carrying forward useful leads (files already found, hypotheses already formed) into the brief is good; using them as an excuse to skip delegation is not.
+
 ## Model selection
 
 Choose the lightest sufficient crew model/command for each delegated workload. Prefer cheaper/faster models for mechanical edits, grep-based research, formatting, documentation sweeps, and straightforward test fixes. Use stronger models for ambiguous debugging, architecture/design decisions, risky refactors, security-sensitive changes, or final synthesis/review. When spawning, set the crew command/model through the available harness controls such as `AK_CREW_COMMAND` when needed, and mention the intended capability level in the brief.

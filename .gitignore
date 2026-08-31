@@ -1,2 +1,5 @@
 .agent-kit/
 .lavish/
+extensions/pi/mcp-bridge/node_modules/
+.pi/
+.DS_Store

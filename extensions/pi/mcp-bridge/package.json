@@ -1,0 +1,13 @@
+{
+  "name": "ak-mcp-bridge",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Pi extension that bridges MCP servers (reusing opencode's mcp config) into Pi tools.",
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0"
+  }
+}

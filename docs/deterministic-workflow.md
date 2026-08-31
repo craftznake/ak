@@ -15,7 +15,7 @@ This is the lightweight, personal version inspired by Firstmate's operating mode
 
 1. **Intake** - restate objective, repo, constraints, and done condition.
 2. **Delegation gate** - before non-trivial tool use, classify the task as `DIRECT` or `DELEGATE`. Use `DIRECT` only for tiny/conversational/clarifying/trivial low-risk work; use `DELEGATE` for investigative, research, comparison, architecture, scaffolding, risky, multi-step, cross-file, long-running, review/audit, or separable work. State the whitelist reason if a non-trivial-looking task remains `DIRECT`.
-3. **Orient** - read instructions, repo status, package/tooling files, and only then source.
+3. **Orient** - read instructions, repo status, and package/tooling files just enough to classify `DIRECT` vs `DELEGATE`. This is a scope check, not the investigation: skim at most a file or two to confirm you understand the shape of the task. If getting to an answer or a root cause requires reading multiple source files, tracing history across files/repos, or reproducing a failure, that is the delegated task itself - route it through the delegation gate (see `docs/primary-agent-model.md`) and spawn a crew rather than continuing to dig personally.
 4. **Plan** - for non-trivial work, write a short checklist; use Lavish for visual/decision-heavy plans.
 5. **Spawn crews for delegated work** - create isolated worktrees and visible Herdr tabs before the primary performs the substantive implementation or research.
 6. **Implement** - make the smallest correct edits, usually in a crew for delegatable work.
