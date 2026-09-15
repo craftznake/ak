@@ -7,6 +7,7 @@ The user's preferred multiplexer is Herdr. This repo uses it as the visible coor
 - one primary agent coordinates the workflow.
 - each crew gets its own VCS workspace (`jj workspace` for jj repos, git worktree for git repos).
 - each crew is surfaced in Herdr as `ak-<slug>`.
+- one Herdr session/workspace ("space") is intended per project: `crew-spawn` opens each crew as a new **tab inside the current Herdr workspace** (resolved from `HERDR_WORKSPACE_ID` when ak runs inside a Herdr-managed pane), instead of creating a separate `agent-kit` workspace. Set `AK_HERDR_WORKSPACE` to pin a different/explicit workspace label if you want crews isolated from the caller's workspace.
 - the primary agent remains responsible for checks, safety, and handoff in chat.
 
 ## Manual task launch
@@ -20,23 +21,23 @@ Then start the desired harness/model in the tab, for example `pi`, `claude`, `op
 
 ## Helper script
 
-`bin/ak` provides a small wrapper:
+`ak` provides a small wrapper:
 
 ```sh
-bin/ak doctor
-bin/ak init
-bin/ak primary-set
-bin/ak plan "migration strategy"
-bin/ak lavish .lavish/migration-strategy.html
-bin/ak herdr-tab fix-login .
-bin/ak crew-spawn fix-login "stabilize the flaky login test"
-AK_CREW_COMMAND='<harness/model command>' bin/ak crew-spawn docs-sweep "update related docs with a lightweight model"
-bin/ak crew-status
-bin/ak crew-audit
-bin/ak crew-report fix-login "ready for review"
-bin/ak crew-peek fix-login 120
-bin/ak crew-send fix-login "how's the test fix going?"
-bin/ak crew-finish fix-login
+ak doctor
+ak init
+ak primary-set
+ak plan "migration strategy"
+ak lavish .lavish/migration-strategy.html
+ak herdr-tab fix-login .
+ak crew-spawn fix-login "stabilize the flaky login test"
+AK_CREW_COMMAND='<harness/model command>' ak crew-spawn docs-sweep "update related docs with a lightweight model"
+ak crew-status
+ak crew-audit
+ak crew-report fix-login "ready for review"
+ak crew-peek fix-login 120
+ak crew-send fix-login "how's the test fix going?"
+ak crew-finish fix-login
 ```
 
 The wrapper refuses Herdr operations when `herdr` is missing; it does not silently fall back to tmux or another multiplexer.

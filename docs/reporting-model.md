@@ -7,7 +7,7 @@ Crew reporting is push-first, not poll-first.
 Run this once from the primary agent's Herdr tab:
 
 ```sh
-bin/ak primary-set
+ak primary-set
 ```
 
 This records the primary Herdr target in `.agent-kit/primary`. By default crew reports wake the primary by sending the report message into the registered agent/pane. This avoids a blocking wait loop while still letting crews trigger the next primary-agent turn. `primary-set` validates explicit Herdr targets and refuses known crew slugs/panes so a crew cannot accidentally register itself as the primary.
@@ -15,7 +15,7 @@ This records the primary Herdr target in `.agent-kit/primary`. By default crew r
 If you want inbox/notification-only behavior, opt out:
 
 ```sh
-bin/ak primary-set --notify-only
+ak primary-set --notify-only
 ```
 
 `--allow-inject` is still accepted for older habits, but wakeup is now the default.
@@ -23,7 +23,7 @@ bin/ak primary-set --notify-only
 Inspect it with:
 
 ```sh
-bin/ak primary-show
+ak primary-show
 ```
 
 ## Crew handback
@@ -31,15 +31,15 @@ bin/ak primary-show
 When a crew is ready to hand back, the preferred command — runnable from inside the worker's own worktree — is:
 
 ```sh
-bin/ak done "summary, changed files, checks, blockers"
+ak done "summary, changed files, checks, blockers"
 ```
 
-`ak done` resolves the crew slug and primary target from the worker role marker (`.agent-kit/role`), writes the report against the primary repo, appends the shared chat transcript, and wakes the primary. Use `bin/ak reply "<message>"` for a mid-task question/status that wakes the primary without ending the task, and `bin/ak chat` to read the transcript.
+`ak done` resolves the crew slug and primary target from the worker role marker (`.agent-kit/role`), writes the report against the primary repo, appends the shared chat transcript, and wakes the primary. Use `ak reply "<message>"` for a mid-task question/status that wakes the primary without ending the task, and `ak chat` to read the transcript.
 
 The equivalent primary-repo-rooted command (used by older crews, or when running from the primary repo) is:
 
 ```sh
-bin/ak crew-report <slug> "summary, changed files, checks, blockers"
+ak crew-report <slug> "summary, changed files, checks, blockers"
 ```
 
 Both go through the same core. That command:
@@ -59,7 +59,7 @@ If no primary is registered, the command still writes the report and inbox entry
 Reporting does not clean up the worktree. The primary still reviews and then runs:
 
 ```sh
-bin/ak crew-finish <slug>
+ak crew-finish <slug>
 ```
 
 `crew-finish` refuses dirty worktrees, preserving safety.

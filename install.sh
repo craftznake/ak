@@ -105,7 +105,7 @@ else
     printf 'npm not found on PATH; run manually: (cd %s/extensions/pi/mcp-bridge && npm install)\n' "$repo_dir"
 fi
 
-install_symlink "$repo_dir/bin/ak" "$local_bin/ak"
+install_symlink "$repo_dir/ak" "$local_ak"
 ensure_path_in_shell "$local_bin"
 
 if [ -d "$repo_dir/.agents/skills/lavish" ]; then

@@ -6,31 +6,31 @@ usage() {
 agent-kit helper
 
 Usage:
-  bin/ak doctor
-  bin/ak init
-  bin/ak plan <title>
-  bin/ak lavish <html-file>
-  bin/ak herdr-tab <slug> [cwd] [command...]
-  bin/ak role
-  bin/ak whoami
-  bin/ak phase [show|set <phase>]
-  bin/ak primary-set [--notify-only|--allow-inject] [target]
-  bin/ak primary-show
-  bin/ak crew-spawn <slug> <brief text...>
-  bin/ak crew-status
-  bin/ak crew-audit
-  bin/ak crew-report <slug> <message text...>
-  bin/ak crew-cost <slug> <usd|unknown> [note...]
-  bin/ak crew-cost-summary
-  bin/ak crew-cost-prompt [message...]
-  bin/ak crew-peek <slug> [lines]
-  bin/ak crew-send <slug> <message text...>
-  bin/ak chat [<slug>] [lines]
-  bin/ak crew-finish <slug> [report text...]
+  ak doctor
+  ak init
+  ak plan <title>
+  ak lavish <html-file>
+  ak herdr-tab <slug> [cwd] [command...]
+  ak role
+  ak whoami
+  ak phase [show|set <phase>]
+  ak primary-set [--notify-only|--allow-inject] [target]
+  ak primary-show
+  ak crew-spawn <slug> <brief text...>
+  ak crew-status
+  ak crew-audit
+  ak crew-report <slug> <message text...>
+  ak crew-cost <slug> <usd|unknown> [note...]
+  ak crew-cost-summary
+  ak crew-cost-prompt [message...]
+  ak crew-peek <slug> [lines]
+  ak crew-send <slug> <message text...>
+  ak chat [<slug>] [lines]
+  ak crew-finish <slug> [report text...]
 
 Worker commands (run from inside a crew worktree):
-  bin/ak reply <message text...>   message the primary mid-task and wake it
-  bin/ak done <message text...>    report completion and wake the primary
+  ak reply <message text...>   message the primary mid-task and wake it
+  ak done <message text...>    report completion and wake the primary
 
 Roles:
   A session is a "worker" when this checkout has a worker role marker
@@ -43,7 +43,9 @@ Phases (backend-dev loop, tracked in .agent-kit/phase):
 Environment:
   AK_BACKEND             session backend (default: herdr; only herdr implemented)
   AK_HERDR_SESSION       Herdr session name (default: default)
-  AK_HERDR_WORKSPACE     Herdr workspace label (default: agent-kit)
+  AK_HERDR_WORKSPACE     Herdr workspace label override; unset uses the
+                         current Herdr workspace (HERDR_WORKSPACE_ID) when ak
+                         runs inside a Herdr-managed pane, else "agent-kit"
   AK_CREW_COMMAND        command run in new crew tab (default: pi)
   AK_CREW_STARTUP_TIMEOUT max ms to wait for a crew agent to settle after the
                          startup prompt is submitted (default: 120000); a
@@ -212,6 +214,36 @@ herdr_workspace_id() {
     printf '%s' "$out" | jq -r '.result.workspace.workspace_id // .workspace.workspace_id // .workspace.id // .result.workspace.id'
 }
 
+# Resolve which Herdr workspace crew/scratch tabs should land in.
+#
+# Preference order:
+#   1. explicit AK_HERDR_WORKSPACE override (label-based lookup/create, as
+#      before) - lets a user pin a dedicated workspace if they want one.
+#   2. the workspace this ak invocation is already running inside
+#      (HERDR_WORKSPACE_ID, set by Herdr for panes it manages) - keeps one
+#      Herdr space per project instead of spawning a separate "agent-kit"
+#      workspace.
+#   3. fall back to the legacy "agent-kit" label when ak is invoked outside
+#      a Herdr-managed pane (e.g. from a script or another terminal).
+#
+# Sets herdr_resolved_workspace_id and herdr_resolved_workspace_label.
+herdr_resolve_workspace() {
+    session=$1
+    if [ -n "${AK_HERDR_WORKSPACE:-}" ]; then
+        herdr_resolved_workspace_label=$AK_HERDR_WORKSPACE
+        herdr_resolved_workspace_id=$(herdr_workspace_id "$session" "$AK_HERDR_WORKSPACE")
+        return 0
+    fi
+    if [ -n "${HERDR_WORKSPACE_ID:-}" ]; then
+        herdr_resolved_workspace_id=$HERDR_WORKSPACE_ID
+        herdr_resolved_workspace_label=$(herdr workspace get "$HERDR_WORKSPACE_ID" --session "$session" 2>/dev/null | jq -r '.result.workspace.label // .workspace.label // empty' 2>/dev/null || true)
+        [ -n "$herdr_resolved_workspace_label" ] || herdr_resolved_workspace_label=$HERDR_WORKSPACE_ID
+        return 0
+    fi
+    herdr_resolved_workspace_label=agent-kit
+    herdr_resolved_workspace_id=$(herdr_workspace_id "$session" agent-kit)
+}
+
 herdr_agent_kind_list=' pi claude codex gemini cursor devin agy cline omp mastracode opencode copilot kimi kiro droid amp grok hermes kilo qodercli maki '
 
 herdr_agent_kind_of() {
@@ -274,8 +306,9 @@ herdr_tab_create() {
         exit 1
     }
     session=${AK_HERDR_SESSION:-default}
-    workspace=${AK_HERDR_WORKSPACE:-agent-kit}
-    wsid=$(herdr_workspace_id "$session" "$workspace")
+    herdr_resolve_workspace "$session"
+    workspace=$herdr_resolved_workspace_label
+    wsid=$herdr_resolved_workspace_id
     label="ak-$tab_slug"
     out=$(herdr tab create --workspace "$wsid" --label "$label" --cwd "$cwd" --no-focus --session "$session")
     pane=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // .root_pane.pane_id // empty')
@@ -576,7 +609,7 @@ crew_worktree_clean() {
 
 crew_spawn() {
     [ "$#" -ge 2 ] || {
-        printf 'usage: bin/ak crew-spawn <slug> <brief text...>\n' >&2
+        printf 'usage: ak crew-spawn <slug> <brief text...>\n' >&2
         exit 2
     }
     need herdr >/dev/null
@@ -795,7 +828,7 @@ crew_audit() {
 
 crew_cost() {
     [ "$#" -ge 2 ] || {
-        printf 'usage: bin/ak crew-cost <slug> <usd|unknown> [note...]\n' >&2
+        printf 'usage: ak crew-cost <slug> <usd|unknown> [note...]\n' >&2
         exit 2
     }
     slug=$(slugify "$1")
@@ -882,7 +915,7 @@ crew_cost_prompt() {
 
 crew_report() {
     [ "$#" -ge 2 ] || {
-        printf 'usage: bin/ak crew-report <slug> <message text...>\n' >&2
+        printf 'usage: ak crew-report <slug> <message text...>\n' >&2
         exit 2
     }
     slug=$(slugify "$1")
@@ -894,7 +927,7 @@ crew_report() {
 
 crew_finish() {
     [ "$#" -ge 1 ] || {
-        printf 'usage: bin/ak crew-finish <slug> [report text...]\n' >&2
+        printf 'usage: ak crew-finish <slug> [report text...]\n' >&2
         exit 2
     }
     slug=$(slugify "$1")
@@ -1003,7 +1036,7 @@ crew_meta_field() {
 
 crew_peek() {
     [ "$#" -ge 1 ] || {
-        printf 'usage: bin/ak crew-peek <slug> [lines]\n' >&2
+        printf 'usage: ak crew-peek <slug> [lines]\n' >&2
         exit 2
     }
     slug=$(slugify "$1")
@@ -1015,7 +1048,7 @@ crew_peek() {
 
 crew_send() {
     [ "$#" -ge 2 ] || {
-        printf 'usage: bin/ak crew-send <slug> <message text...>\n' >&2
+        printf 'usage: ak crew-send <slug> <message text...>\n' >&2
         exit 2
     }
     slug=$(slugify "$1")
@@ -1215,7 +1248,7 @@ phase_show() {
 
 phase_set() {
     [ "$#" -ge 1 ] || {
-        printf 'usage: bin/ak phase set <phase>\n' >&2
+        printf 'usage: ak phase set <phase>\n' >&2
         printf 'phases: research planning awaiting-approval implementing testing done\n' >&2
         exit 2
     }
@@ -1291,7 +1324,7 @@ ak_chat() {
         return 0
     fi
     [ "$#" -ge 1 ] || {
-        printf 'usage (primary): bin/ak chat <slug> [lines]\n' >&2
+        printf 'usage (primary): ak chat <slug> [lines]\n' >&2
         exit 2
     }
     slug=$(slugify "$1")
@@ -1303,7 +1336,7 @@ ak_chat() {
 # reply: worker -> primary, mid-task (no completion). Wakes the primary.
 ak_reply() {
     [ "$#" -ge 1 ] || {
-        printf 'usage: bin/ak reply <message text...>\n' >&2
+        printf 'usage: ak reply <message text...>\n' >&2
         exit 2
     }
     marker=$(require_worker_marker)
@@ -1325,7 +1358,7 @@ ak_reply() {
 # the primary. Runnable from the worker's own worktree.
 ak_done() {
     [ "$#" -ge 1 ] || {
-        printf 'usage: bin/ak done <message text...>\n' >&2
+        printf 'usage: ak done <message text...>\n' >&2
         exit 2
     }
     marker=$(require_worker_marker)

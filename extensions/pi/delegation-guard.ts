@@ -5,7 +5,7 @@ import type { ExtensionAPI, ToolResultEvent } from "@earendil-works/pi-coding-ag
 // docs/deterministic-workflow.md. That gate is prose-only today, so nothing
 // stops a primary agent from quietly doing multi-file investigative or
 // implementation work itself instead of spawning a crew via
-// `bin/ak crew-spawn`.
+// `ak crew-spawn`.
 //
 // This extension tracks a rolling count of "investigative" tool calls
 // (read, grep, find, ls, and bash/powershell commands that look like
@@ -14,7 +14,7 @@ import type { ExtensionAPI, ToolResultEvent } from "@earendil-works/pi-coding-ag
 // contained an explicit `DIRECT` whitelist-reason justification.
 //
 // - Crossing a soft threshold injects a steering reminder message (not a
-//   block) suggesting `bin/ak crew-spawn`.
+//   block) suggesting `ak crew-spawn`.
 // - Crossing a hard threshold shows a confirm dialog (TUI/RPC only) asking
 //   whether to keep going DIRECT or delegate now, and reflects the answer
 //   back into the session as a steering message. In modes without UI
@@ -137,7 +137,7 @@ export default function delegationGuard(pi: ExtensionAPI) {
                     const keepGoing = await ctx.ui.confirm(
                         "Delegation gate",
                         `${sinceReset} investigative tool calls since the last crew-spawn or DIRECT justification. ` +
-                            "Keep working DIRECT? Choose No to delegate this to a crew via bin/ak crew-spawn now.",
+                            "Keep working DIRECT? Choose No to delegate this to a crew via ak crew-spawn now.",
                     );
                     pi.sendMessage(
                         {
@@ -147,7 +147,7 @@ export default function delegationGuard(pi: ExtensionAPI) {
                                 ? "User confirmed continuing DIRECT past the delegation-gate hard threshold. " +
                                   "Proceed with the smallest correct change, and re-run the delegation gate if scope grows further."
                                 : "User chose to delegate at the delegation-gate hard threshold. Stop further direct " +
-                                  "investigation/implementation now and spawn a crew via `bin/ak crew-spawn <slug> <brief>` " +
+                                  "investigation/implementation now and spawn a crew via `ak crew-spawn <slug> <brief>` " +
                                   "before continuing.",
                         },
                         { deliverAs: "steer" },
@@ -163,7 +163,7 @@ export default function delegationGuard(pi: ExtensionAPI) {
                         content:
                             `Delegation gate: ${sinceReset} investigative tool calls since the last crew-spawn or DIRECT ` +
                             "justification, well past the reminder threshold. Classify this DIRECT vs DELEGATE now: state " +
-                            "the whitelist reason if staying DIRECT, or spawn a crew via `bin/ak crew-spawn <slug> <brief>`.",
+                            "the whitelist reason if staying DIRECT, or spawn a crew via `ak crew-spawn <slug> <brief>`.",
                     },
                     { deliverAs: "steer" },
                 );
@@ -177,7 +177,7 @@ export default function delegationGuard(pi: ExtensionAPI) {
                     content:
                         `Delegation gate reminder: ${sinceReset} investigative tool calls (read/grep/find/bash search) ` +
                         "since the last crew-spawn or DIRECT justification. Per shared.md's delegation gate, classify " +
-                        "this as DIRECT (state the whitelist reason) or DELEGATE now via `bin/ak crew-spawn <slug> <brief>`.",
+                        "this as DIRECT (state the whitelist reason) or DELEGATE now via `ak crew-spawn <slug> <brief>`.",
                 },
                 { deliverAs: "steer" },
             );

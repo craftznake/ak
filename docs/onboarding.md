@@ -10,7 +10,7 @@ Clone once:
 git clone <your-agent-kit-repo-url> ~/agent-kit
 cd ~/agent-kit
 ./install.sh
-bin/ak doctor
+ak doctor
 ```
 
 Then restart your agent harnesses.
@@ -22,7 +22,7 @@ What `install.sh` does:
 - symlinks `pi.md` to `~/.pi/agent/AGENTS.md`
 - symlinks `shared.md` beside Pi's entrypoint for relative imports
 - symlinks the Pi `ak-context-file-imports` extension to `~/.pi/agent/extensions/ak-context-file-imports.ts` so `@shared.md`-style imports are expanded into Pi's system prompt
-- symlinks `bin/ak` to `~/.local/bin/ak`
+- symlinks `ak` to `~/.local/ak`
 - adds an idempotent `~/.local/bin` PATH block to the active shell's startup file when that file is writable
 - creates or updates an opencode config so it includes this repo's `opencode.md` in `instructions`
 - symlinks the local Lavish skill into `~/.claude/skills/lavish`
@@ -36,26 +36,26 @@ For opencode with an existing config, `install.sh` will merge this repo's `openc
 From the repo you are working in:
 
 ```sh
-/path/to/agent-kit/bin/ak doctor
-/path/to/agent-kit/bin/ak init
-/path/to/agent-kit/bin/ak primary-set
+/path/to/agent-kit/ak doctor
+/path/to/agent-kit/ak init
+/path/to/agent-kit/ak primary-set
 ```
 
 Then talk to the primary agent normally. For multi-step work it can spawn crews:
 
 ```sh
-/path/to/agent-kit/bin/ak crew-spawn fix-login "stabilize flaky login test"
+/path/to/agent-kit/ak crew-spawn fix-login "stabilize flaky login test"
 ```
 
 Crews report back with:
 
 ```sh
-/path/to/agent-kit/bin/ak crew-report fix-login "fixed, tests passed, ready for review"
+/path/to/agent-kit/ak crew-report fix-login "fixed, tests passed, ready for review"
 ```
 
 ## Shell convenience
 
-`install.sh` symlinks `ak` into `~/.local/bin/ak` and appends a marked, idempotent PATH block for the active shell (`~/.zshrc`, `~/.bashrc`, fish `conf.d`, or `~/.profile`) when that block is not already installed and the startup file is writable.
+`install.sh` symlinks `ak` into `~/.local/ak` and appends a marked, idempotent PATH block for the active shell (`~/.zshrc`, `~/.bashrc`, fish `conf.d`, or `~/.profile`) when that block is not already installed and the startup file is writable.
 
 After install, restart the shell or source the updated startup file, then use:
 
@@ -98,9 +98,9 @@ git submodule add <your-agent-kit-repo-url> tools/agent-kit
 Then project agents can use:
 
 ```sh
-tools/agent-kit/bin/ak init
-tools/agent-kit/bin/ak primary-set
-tools/agent-kit/bin/ak crew-spawn <slug> "<brief>"
+tools/agent-kit/ak init
+tools/agent-kit/ak primary-set
+tools/agent-kit/ak crew-spawn <slug> "<brief>"
 ```
 
 This is better when the project team wants the same helper scripts and docs.
@@ -116,8 +116,8 @@ This is better when the project team wants the same helper scripts and docs.
 2. Clone this repo.
 3. Run `./install.sh`.
 4. Restart harnesses.
-5. Run `bin/ak doctor`.
-6. In each active work repo, run `bin/ak init` and `bin/ak primary-set`.
+5. Run `ak doctor`.
+6. In each active work repo, run `ak init` and `ak primary-set`.
 
 ## Notes
 

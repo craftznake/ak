@@ -36,6 +36,6 @@ This repo becomes a small deterministic agent kit:
 
 - shared instructions define the behavior contract
 - Herdr gives visible task containers
-- `bin/ak` provides minimal repeatable commands
+- `ak` provides minimal repeatable commands
 - Lavish is available as a skill/workflow for interactive planning
 - humans remain the authority for merges, destructive actions, and scope changes

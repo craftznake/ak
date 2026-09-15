@@ -7,7 +7,7 @@ This is intentionally a **small Firstmate-inspired workflow**. It keeps the part
 - one primary agent you chat with that self-detects its role (primary vs worker)
 - a primary that coordinates multiple crews (workers) in isolated VCS workspaces (`jj workspace` for jj repos, git worktrees for git repos)
 - a primary/worker message chatbox: workers wake the primary when done
-- a backend-dev loop: research → plan → approve → implement → test → notify, with phases
+- a backend-dev loop: research -> plan -> approve -> implement -> test -> notify, with phases
 - Herdr-visible task tabs (behind a backend seam so other backends can be added later)
 - Lavish-powered interactive planning for architectural/big changes
 - explicit safety boundaries instead of hidden autonomy
@@ -20,7 +20,7 @@ This is intentionally a **small Firstmate-inspired workflow**. It keeps the part
 - `pi.md` - Pi entrypoint
 - `opencode.md` - opencode entrypoint
 - `extensions/pi/ak-context-file-imports.ts` - Pi extension that expands `@*.md` imports from loaded context files into the system prompt
-- `bin/ak` - small helper for setup, plans, Lavish, Herdr tabs, and crew lifecycle
+- `ak` - small helper for setup, plans, Lavish, Herdr tabs, and crew lifecycle
 - `docs/deterministic-workflow.md` - workflow contract
 - `docs/roles-model.md` - primary/worker role detection, worker marker, and chatbox
 - `docs/dev-workflow.md` - backend-dev loop (research → plan → approve → implement → test → notify) and phases
@@ -46,7 +46,7 @@ The script:
 - symlinks `pi.md` to `~/.pi/agent/AGENTS.md`
 - symlinks `shared.md` beside those entrypoints for relative imports
 - symlinks the Pi `ak-context-file-imports` extension to expand `@shared.md`-style context imports
-- symlinks `bin/ak` to `~/.local/bin/ak`
+- symlinks `ak` to `~/.local/ak`
 - adds an idempotent `~/.local/bin` PATH block to the active shell's startup file when that file is writable
 - creates or updates an opencode config so it includes this repo's `opencode.md` in `instructions`
 - symlinks the local Lavish skill into `~/.claude/skills/lavish`
@@ -65,7 +65,7 @@ Short version:
 git clone <your-agent-kit-repo-url> ~/agent-kit
 cd ~/agent-kit
 ./install.sh
-bin/ak doctor
+ak doctor
 ```
 
 In a work repo:
@@ -80,26 +80,26 @@ ak primary-set
 Primary side:
 
 ```sh
-bin/ak doctor
-bin/ak init
-bin/ak role                 # -> primary (default when unset)
-bin/ak primary-set
-bin/ak phase set research
-bin/ak plan "fix flaky login test"
-bin/ak phase set implementing
-bin/ak crew-spawn fix-login "stabilize the flaky login test"
-bin/ak chat fix-login       # read the primary/worker transcript
-bin/ak crew-audit
-bin/ak crew-finish fix-login
-bin/ak phase set done
+ak doctor
+ak init
+ak role                 # -> primary (default when unset)
+ak primary-set
+ak phase set research
+ak plan "fix flaky login test"
+ak phase set implementing
+ak crew-spawn fix-login "stabilize the flaky login test"
+ak chat fix-login       # read the primary/worker transcript
+ak crew-audit
+ak crew-finish fix-login
+ak phase set done
 ```
 
 Worker side (inside the crew worktree the primary spawned):
 
 ```sh
-bin/ak role                 # -> worker
-bin/ak reply "which config toggles the login timeout?"   # ask mid-task, wakes primary
-bin/ak done "fixed the flaky wait, added a regression test, suite green"  # report + wake primary
+ak role                 # -> worker
+ak reply "which config toggles the login timeout?"   # ask mid-task, wakes primary
+ak done "fixed the flaky wait, added a regression test, suite green"  # report + wake primary
 ```
 
 For interactive planning:
@@ -107,7 +107,7 @@ For interactive planning:
 ```sh
 mkdir -p .lavish
 # agent writes .lavish/plan.html
-bin/ak lavish .lavish/plan.html
+ak lavish .lavish/plan.html
 npx -y lavish-axi poll .lavish/plan.html
 ```
 

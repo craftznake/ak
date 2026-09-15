@@ -56,4 +56,4 @@ Primary and workers share a durable per-crew transcript at `.agent-kit/crew/<slu
 
 ## Backend
 
-All session-backend interaction (wake, notify, pane read/send, tab close, agent status) goes through `backend_*` wrappers in `bin/ak`, selected by `AK_BACKEND` (default `herdr`). Only `herdr` is implemented today; the seam exists so another backend (tmux, zellij, ...) can be added by implementing those cases without touching the command surface. An unknown `AK_BACKEND` fails with a clear error instead of guessing.
+All session-backend interaction (wake, notify, pane read/send, tab close, agent status) goes through `backend_*` wrappers in `ak`, selected by `AK_BACKEND` (default `herdr`). Only `herdr` is implemented today; the seam exists so another backend (tmux, zellij, ...) can be added by implementing those cases without touching the command surface. An unknown `AK_BACKEND` fails with a clear error instead of guessing.

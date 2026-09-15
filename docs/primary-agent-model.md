@@ -8,11 +8,11 @@ The primary agent owns:
 
 - intake and scope clarification
 - deciding how to delegate work, with local execution reserved for truly tiny/direct tasks
-- spawning crews with `bin/ak crew-spawn`
+- spawning crews with `ak crew-spawn`
 - choosing the lightest sufficient crew model/command for each workload
 - keeping the user updated at the outcome/decision level
 - reviewing crew reports
-- cleanup with `bin/ak crew-finish`
+- cleanup with `ak crew-finish`
 
 The user should not need to manually manage every crew.
 
@@ -62,13 +62,13 @@ Choose the lightest sufficient crew model/command for each delegated workload. P
 2. Run the delegation gate: classify `DIRECT` or `DELEGATE`.
 3. If `DIRECT`, state the whitelist reason when the task could appear non-trivial, then answer or make the tiny edit.
 4. If `DELEGATE`, state a short dispatch plan.
-5. Register primary if needed: `ak primary-set` or `bin/ak primary-set` when the helper is repo-local.
-6. Spawn one or more crews: `ak crew-spawn <slug> <brief>` or `bin/ak crew-spawn <slug> <brief>`.
+5. Register primary if needed: `ak primary-set` or `ak primary-set` when the helper is repo-local.
+6. Spawn one or more crews: `ak crew-spawn <slug> <brief>` or `ak crew-spawn <slug> <brief>`.
 7. Keep primary work to intake, supervision, synthesis, final review, and user decisions.
-8. Let crews report back with `ak crew-report`/`bin/ak crew-report`; the report wakes the registered primary instead of relying on a blocking wait loop.
+8. Let crews report back with `ak crew-report`/`ak crew-report`; the report wakes the registered primary instead of relying on a blocking wait loop.
 9. Review reports and inspect worktrees as needed.
 10. Ask user only for real decisions, merge/destructive approval, or scope changes.
-11. Finish safe crews with `ak crew-finish <slug>`/`bin/ak crew-finish <slug>`.
+11. Finish safe crews with `ak crew-finish <slug>`/`ak crew-finish <slug>`.
 12. Report final outcome.
 
 ## User-facing feel
@@ -87,4 +87,4 @@ The primary should hide routine mechanics but never hide risk, blockers, or unce
 
 ## Mechanical enforcement (pi)
 
-The delegation gate above is a policy, enforced today mostly by the agent re-reading and self-policing it each turn. For the pi harness, `extensions/pi/delegation-guard.ts` adds a lightweight mechanical nudge/escalation on top of it: it counts investigative tool calls since the last `bin/ak crew-spawn`-shaped command or stated `DIRECT` justification, and injects reminder messages (then an optional confirm prompt) as that count grows, without blocking any tool call. See `docs/delegation-guard.md` for thresholds, config, and how to disable it. It does not change the policy in this document; it only makes it harder to silently ignore inside a pi session.
+The delegation gate above is a policy, enforced today mostly by the agent re-reading and self-policing it each turn. For the pi harness, `extensions/pi/delegation-guard.ts` adds a lightweight mechanical nudge/escalation on top of it: it counts investigative tool calls since the last `ak crew-spawn`-shaped command or stated `DIRECT` justification, and injects reminder messages (then an optional confirm prompt) as that count grows, without blocking any tool call. See `docs/delegation-guard.md` for thresholds, config, and how to disable it. It does not change the policy in this document; it only makes it harder to silently ignore inside a pi session.

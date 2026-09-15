@@ -21,7 +21,7 @@ The extension counts "investigative" tool results since the last reset:
 
 The counter resets to zero whenever:
 
-- a `bash`/`powershell` call's command matches a crew-spawn shape (`bin/ak
+- a `bash`/`powershell` call's command matches a crew-spawn shape (`ak
   crew-spawn ...` or `ak crew-spawn ...`) and did not error, or
 - an assistant message contains the literal word `DIRECT` (the whitelist-reason
   language shared.md already asks the agent to state when staying DIRECT on a
@@ -30,7 +30,7 @@ The counter resets to zero whenever:
 Two thresholds escalate the response, both **non-blocking**:
 
 1. **Soft threshold** (default 6): injects a steering reminder message citing
-   the current count and suggesting `bin/ak crew-spawn` or a stated DIRECT
+   the current count and suggesting `ak crew-spawn` or a stated DIRECT
    justification. Repeats every `soft` calls past the first crossing.
 2. **Hard threshold** (default 12, or `2x soft` if configured lower than
    soft): in TUI/RPC mode, shows `ctx.ui.confirm(...)` asking whether to keep
@@ -58,7 +58,7 @@ Environment variables, read once at extension load:
 | `AK_DELEGATION_GUARD_HARD_THRESHOLD` | `12` | Investigative-call count that triggers the hard confirm/strong-reminder escalation. Must exceed the soft threshold; if configured `<=` soft, it is coerced to `2x soft`. |
 
 There is no `.agent-kit/` config file for this extension; env vars were
-chosen to match the rest of this repo's convention (`bin/ak`'s
+chosen to match the rest of this repo's convention (`ak`'s
 `AK_CREW_COMMAND`, `AK_NO_NOTIFY`, etc.) and to make it trivial to override
 per-invocation (`AK_DELEGATION_GUARD_SOFT_THRESHOLD=3 pi`) without editing
 files.
@@ -123,7 +123,7 @@ Verified directly against a real `pi --mode json -p` session with
   the count, repeats on subsequent crossings
 - hard-threshold message fires (fallback text, since `-p`/JSON mode has no
   UI) after crossing the hard count
-- a `bash` call matching `bin/ak crew-spawn ...` resets the counter to zero,
+- a `bash` call matching `ak crew-spawn ...` resets the counter to zero,
   confirmed by a following investigative call re-triggering the soft
   reminder at count 1 instead of continuing to climb
 - an assistant message containing the word `DIRECT` also resets the counter

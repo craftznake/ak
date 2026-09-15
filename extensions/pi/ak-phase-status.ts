@@ -7,7 +7,7 @@ import * as path from "node:path";
 // in the research -> planning -> awaiting-approval -> implementing -> testing ->
 // done loop that shared.md / docs/dev-workflow.md define.
 //
-// It reads two files written by `bin/ak`:
+// It reads two files written by `ak`:
 //   <repo>/.agent-kit/role   (role=worker marker; absent => primary)
 //   <repo>/.agent-kit/phase  (phase=<name>, set via `ak phase set <name>`)
 //

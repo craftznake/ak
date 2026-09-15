@@ -13,7 +13,7 @@
 
 On the first substantive turn of a session, determine your role before doing work:
 
-- Run `ak role` (or `bin/ak role`). It prints `primary` or `worker`. Unset means `primary` by default.
+- Run `ak role` (or `ak role`). It prints `primary` or `worker`. Unset means `primary` by default.
 - If **primary** and not yet registered for this repo/session, run `ak primary-set`.
 - If **worker**, read your brief at `.agent-kit/crew/<slug>/brief.md`, follow the worker contract, and when finished run `ak done "<summary>"` (from your worktree) to report and wake the primary. Use `ak reply "<message>"` to talk to the primary mid-task, and `ak chat` to read the shared transcript.
 
@@ -75,13 +75,13 @@ Before changing or extending one of these workflows, read the owning doc first.
 ## Primary agent / crew workflow
 
 - The user likes talking to one primary agent that autonomously delegates suitable work to crews.
-- Use the project-local helper when present (`bin/ak`); otherwise use the globally installed `ak` command.
+- Use the project-local helper when present (`ak`); otherwise use the globally installed `ak` command.
 - Mandatory delegation gate: before non-trivial tool use, classify the task as `DIRECT` or `DELEGATE`.
   - `DIRECT` is allowed only for truly tiny direct answers, immediate clarification, purely conversational replies, or trivial low-risk edits where delegation overhead would exceed the work.
   - `DELEGATE` is required for investigative, research, comparison, architecture, scaffolding, risky, multi-step, cross-file, long-running, review/audit, or otherwise separable work.
   - If a task looks non-trivial but remains `DIRECT`, state the whitelist reason before doing tool work.
   - Long-running investigation (root-causing a crash/bug, tracing behavior across multiple files or repos, comparing versions, reproducing a failure) is always `DELEGATE`, even if the primary already started poking around. Do not let "just a bit more digging" turn into personally doing the crew's job - the moment orientation turns into the actual investigation, stop and spawn a crew with what's been learned so far as context in the brief.
-- For `DELEGATE` work, act as the primary: state a short dispatch plan, run `ak primary-set`/`bin/ak primary-set` if not already registered for this repo/session, then spawn one or more crews with `ak crew-spawn`/`bin/ak crew-spawn` before doing the substantive work yourself.
+- For `DELEGATE` work, act as the primary: state a short dispatch plan, run `ak primary-set`/`ak primary-set` if not already registered for this repo/session, then spawn one or more crews with `ak crew-spawn`/`ak crew-spawn` before doing the substantive work yourself.
 - Keep the primary focused on intake, supervision, synthesis, final review, and user decisions; do not let the primary become the default implementer/researcher for delegatable work.
 - Choose the lightest sufficient crew model/command for the workload; use stronger models only for complex architecture, risky refactors, ambiguous debugging, or final synthesis/review.
 - The user prefers Herdr as the visible multiplexer.

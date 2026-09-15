@@ -4,7 +4,7 @@ This repository supports both jj and git working-copy isolation for crews.
 
 ## Crew workspace cleanup
 
-`bin/ak crew-finish` owns VCS cleanup after the safety preconditions are met: a report exists and the crew worktree is clean.
+`ak crew-finish` owns VCS cleanup after the safety preconditions are met: a report exists and the crew worktree is clean.
 
 ### jj
 
