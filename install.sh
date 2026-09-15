@@ -90,6 +90,7 @@ install_symlink "$repo_dir/pi.md" "$HOME/.pi/agent/AGENTS.md"
 install_symlink "$repo_dir/shared.md" "$HOME/.pi/agent/shared.md"
 install_symlink "$repo_dir/extensions/pi/ak-context-file-imports.ts" "$HOME/.pi/agent/extensions/ak-context-file-imports.ts"
 install_symlink "$repo_dir/extensions/pi/delegation-guard.ts" "$HOME/.pi/agent/extensions/delegation-guard.ts"
+install_symlink "$repo_dir/extensions/pi/ak-phase-status.ts" "$HOME/.pi/agent/extensions/ak-phase-status.ts"
 install_symlink "$repo_dir/extensions/pi/mcp-bridge" "$HOME/.pi/agent/extensions/mcp-bridge"
 install_symlink "$repo_dir/extensions/pi/ui.ts" "$HOME/.pi/agent/extensions/ui.ts"
 

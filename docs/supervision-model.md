@@ -4,6 +4,9 @@ The primary agent supervises crews instead of babysitting every terminal manuall
 
 ## Commands
 
+- `bin/ak role` - print whether this session is `primary` or `worker`.
+- `bin/ak whoami` - verbose identity: role, slug, primary target, backend, phase.
+- `bin/ak phase [show|set <phase>]` - read/advance the backend-dev phase (`.agent-kit/phase`).
 - `bin/ak primary-set` - register the primary agent's Herdr target once.
 - `bin/ak primary-show` - inspect the recorded primary target.
 - `bin/ak crew-status` - compact table for all crews.
@@ -13,8 +16,11 @@ The primary agent supervises crews instead of babysitting every terminal manuall
 - `bin/ak crew-cost-summary` - summarize logged spend across crews.
 - `bin/ak crew-cost-prompt [message...]` - proactively ask all active crews to log current spend.
 - `bin/ak crew-peek <slug>` - inspect a crew's visible Herdr output.
-- `bin/ak crew-send <slug> <message>` - nudge a crew directly.
+- `bin/ak crew-send <slug> <message>` - nudge a crew directly (also logged to the shared chat).
+- `bin/ak chat <slug> [lines]` - read the primary/worker chat transcript for a crew.
 - `bin/ak crew-finish <slug>` - close a clean crew and remove its isolated worktree.
+
+Worker-side (run from inside a crew worktree): `bin/ak reply <message>` messages the primary mid-task and wakes it; `bin/ak done <message>` reports completion and wakes the primary.
 
 ## Recommended loop
 

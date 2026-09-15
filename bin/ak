@@ -11,6 +11,9 @@ Usage:
   bin/ak plan <title>
   bin/ak lavish <html-file>
   bin/ak herdr-tab <slug> [cwd] [command...]
+  bin/ak role
+  bin/ak whoami
+  bin/ak phase [show|set <phase>]
   bin/ak primary-set [--notify-only|--allow-inject] [target]
   bin/ak primary-show
   bin/ak crew-spawn <slug> <brief text...>
@@ -22,16 +25,30 @@ Usage:
   bin/ak crew-cost-prompt [message...]
   bin/ak crew-peek <slug> [lines]
   bin/ak crew-send <slug> <message text...>
+  bin/ak chat [<slug>] [lines]
   bin/ak crew-finish <slug> [report text...]
 
+Worker commands (run from inside a crew worktree):
+  bin/ak reply <message text...>   message the primary mid-task and wake it
+  bin/ak done <message text...>    report completion and wake the primary
+
+Roles:
+  A session is a "worker" when this checkout has a worker role marker
+  (written by crew-spawn); otherwise it is the "primary" by default.
+  Run "ak role" first to find out which you are.
+
+Phases (backend-dev loop, tracked in .agent-kit/phase):
+  research -> planning -> awaiting-approval -> implementing -> testing -> done
+
 Environment:
+  AK_BACKEND             session backend (default: herdr; only herdr implemented)
   AK_HERDR_SESSION       Herdr session name (default: default)
   AK_HERDR_WORKSPACE     Herdr workspace label (default: agent-kit)
   AK_CREW_COMMAND        command run in new crew tab (default: pi)
   AK_CREW_STARTUP_TIMEOUT max ms to wait for a crew agent to settle after the
                          startup prompt is submitted (default: 120000); a
                          timeout only logs a warning, it does not fail spawn
-  AK_NO_NOTIFY           disable Herdr notifications when set to 1
+  AK_NO_NOTIFY           disable backend notifications when set to 1
   AK_NO_WAKE             disable primary wakeup injection when set to 1
   AK_COST_CURRENCY       currency label for crew-cost (default: USD)
 USAGE
@@ -463,21 +480,15 @@ primary_inject() {
 primary_notify() {
     message=$*
     session=$(primary_session 2>/dev/null || printf '%s' "${AK_HERDR_SESSION:-default}")
-    command -v herdr >/dev/null 2>&1 || return 1
-    [ "${AK_NO_NOTIFY:-0}" = 1 ] || herdr notification show "agent-kit crew update" --body "$message" --sound done --session "$session" >/dev/null 2>&1 || true
+    backend_notify "$session" "agent-kit crew update" "$message"
     [ "${AK_NO_WAKE:-0}" = 1 ] && return 0
     [ "$(primary_inject 2>/dev/null || printf 1)" = 1 ] || return 0
     target=$(primary_target 2>/dev/null || true)
     [ -n "$target" ] || return 0
-    # Fire-and-forget wake: submit atomically via the agent surface, which
-    # honors the pane's live bracketed-paste mode so the Enter is not
-    # swallowed. Fall back to raw pane input only if the target does not
-    # resolve to a recognized agent (e.g. a plain shell pane).
-    if ! herdr agent prompt "$target" "$message" --session "$session" >/dev/null 2>&1; then
-        if herdr pane send-text "$target" "$message" --session "$session" >/dev/null 2>&1; then
-            herdr pane send-keys "$target" enter --session "$session" >/dev/null 2>&1 || true
-        fi
-    fi
+    # Fire-and-forget wake via the backend seam. For herdr this submits via the
+    # agent surface (honoring bracketed-paste) and falls back to raw pane input
+    # for a plain shell pane.
+    backend_wake "$session" "$target" "$message" >/dev/null 2>&1 || true
 }
 
 crew_base() {
@@ -607,6 +618,21 @@ crew_spawn() {
         git -C "$root" worktree add -b "$branch" "$worktree" HEAD >/dev/null
     fi
     lock_release
+    # Stamp a worker role marker inside the worktree so the crew agent can
+    # self-detect its role (ak role -> worker) and wake the primary from its
+    # own cwd (ak reply / ak done). ".agent-kit/" is gitignored, so this marker
+    # never makes the worktree look dirty in git or jj.
+    primary_session_val=$(primary_field_at "$root" session 2>/dev/null || printf '%s' "${AK_HERDR_SESSION:-default}")
+    primary_target_val=$(primary_field_at "$root" target 2>/dev/null || true)
+    mkdir -p "$worktree/.agent-kit"
+    cat >"$worktree/.agent-kit/role" <<EOF
+role=worker
+slug=$slug
+primary_repo=$root
+primary_session=$primary_session_val
+primary_target=$primary_target_val
+created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
     cat >"$crew_dir/brief.md" <<EOF
 # Crew task: $slug
 
@@ -616,14 +642,16 @@ $brief
 
 ## Contract
 
+- You are a WORKER. Run \`$ak_cmd role\` to confirm (it prints "worker" here).
 - Read project instructions before changing files.
 - Work only inside this isolated worktree: $worktree
 - Make the smallest correct change.
 - Run relevant checks.
 - Do not merge, force-push, reset, clean, or discard work.
-- Log spend when asked, at meaningful milestones, and before handback with: cd "$root" && $ak_cmd crew-cost $slug <usd|unknown> "model/session, token estimate if known, and what work the spend covered".
-- When ready to hand back, run: cd "$root" && $ak_cmd crew-report $slug "summary, files changed, checks, cost notes, blockers" so the primary gets a push notification.
-- Report changed files, checks, cost notes, and blockers to the primary agent.
+- Log spend when asked, at meaningful milestones, and before handback with: $ak_cmd crew-cost $slug <usd|unknown> "model/session, token estimate if known, and what work the spend covered" (run from "$root", or use \`cd "$root"\`).
+- Talk to the primary mid-task with: \`$ak_cmd reply "question or status"\` (works from this worktree; it wakes the primary).
+- When finished, run from this worktree: \`$ak_cmd done "summary, files changed, checks, cost notes, blockers"\`. This writes the report and wakes the primary.
+- Read the shared chat transcript any time with: \`$ak_cmd chat\`.
 EOF
     cat >"$crew_dir/report.template.md" <<EOF
 # Crew report: $slug
@@ -708,11 +736,8 @@ crew_status() {
         worktree=$(awk -F= '$1=="worktree" {print $2}' "$meta")
         branch=$(awk -F= '$1=="branch" {print $2}' "$meta")
         report=$(crew_report_path "$slug")
-        state=unknown
-        if [ -n "$pane" ] && [ -n "$session" ] && command -v herdr >/dev/null 2>&1; then
-            state=$(herdr agent get "$pane" --session "$session" 2>/dev/null | jq -r '.result.agent.agent_status // .error.code // "unknown"' 2>/dev/null || printf unknown)
-            [ -n "$state" ] || state=unknown
-        fi
+        state=$(backend_agent_status "$session" "$pane")
+        [ -n "$state" ] || state=unknown
         if [ -n "$worktree" ] && [ -d "$worktree" ]; then
             if crew_worktree_clean "$worktree"; then
                 cleanliness=clean
@@ -745,11 +770,8 @@ crew_audit() {
         worktree=$(awk -F= '$1=="worktree" {print $2}' "$meta")
         branch=$(awk -F= '$1=="branch" {print $2}' "$meta")
         report=$(crew_report_path "$slug")
-        state=unknown
-        if [ -n "$pane" ] && [ -n "$session" ] && command -v herdr >/dev/null 2>&1; then
-            state=$(herdr agent get "$pane" --session "$session" 2>/dev/null | jq -r '.result.agent.agent_status // .error.code // "unknown"' 2>/dev/null || printf unknown)
-            [ -n "$state" ] || state=unknown
-        fi
+        state=$(backend_agent_status "$session" "$pane")
+        [ -n "$state" ] || state=unknown
         if [ -n "$worktree" ] && [ -d "$worktree" ]; then
             if crew_worktree_clean "$worktree"; then
                 cleanliness=clean
@@ -852,8 +874,7 @@ crew_cost_prompt() {
         session=$(awk -F= '$1=="herdr_session" {print $2}' "$meta")
         [ -n "$pane" ] && [ -n "$session" ] || continue
         message="Please log current estimated spend with: $ak_cmd crew-cost $slug <usd|unknown> \"model/session, token estimate if known, and what work the spend covered\". ${custom:-}"
-        herdr pane send-text "$pane" "$message" --session "$session" >/dev/null 2>&1 || continue
-        herdr pane send-keys "$pane" enter --session "$session" >/dev/null 2>&1 || true
+        backend_pane_send "$session" "$pane" "$message" >/dev/null 2>&1 || continue
         sent=$((sent + 1))
     done
     printf 'cost prompts sent: %s\n' "$sent"
@@ -866,29 +887,9 @@ crew_report() {
     }
     slug=$(slugify "$1")
     shift
-    meta=$(crew_meta_path "$slug")
-    [ -f "$meta" ] || {
-        printf 'unknown crew: %s\n' "$slug" >&2
-        exit 1
-    }
-    report=$(crew_report_path "$slug")
-    mkdir -p "$(dirname "$report")"
-    {
-        printf '# Crew report: %s\n\n' "$slug"
-        printf '## Outcome\n\n%s\n\n' "$*"
-        printf '## Files changed\n\n- see worktree\n\n'
-        printf '## Checks\n\n- pending or included above\n\n'
-        printf '## Cost\n\n- see cost.tsv or included above\n\n'
-        printf '## Notes\n\n- reported_at: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    } >"$report"
-    reported_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    printf 'state=reported\nreported_at=%s\n' "$reported_at" >"$(dirname "$meta")/state"
-    inbox="$(agentkit_dir)/inbox"
-    mkdir -p "$inbox"
-    printf '# Crew update: %s\n\n- reported_at: %s\n- report: %s\n\n%s\n' "$slug" "$reported_at" "$report" "$*" >"$inbox/${reported_at}-$slug.md"
-    primary_notify "crew $slug: $*" >/dev/null 2>&1 || true
-    printf 'crew reported: %s\n' "$slug"
-    printf 'report: %s\n' "$report"
+    root=$(repo_root)
+    chat_append "$root" "$slug" worker "report: $*"
+    crew_report_core "$root" "$slug" "$*"
 }
 
 crew_finish() {
@@ -949,8 +950,8 @@ EOF
         fi
     fi
     if command -v herdr >/dev/null 2>&1 && [ -n "$tab" ] && [ -n "$session" ]; then
-        herdr tab close "$tab" --session "$session" >/dev/null 2>&1 || {
-            printf 'could not close Herdr tab for %s\n' "$slug" >&2
+        backend_tab_close "$session" "$tab" || {
+            printf 'could not close crew tab for %s\n' "$slug" >&2
             exit 1
         }
     fi
@@ -1009,7 +1010,7 @@ crew_peek() {
     lines=${2:-80}
     pane=$(crew_meta_field "$slug" herdr_pane)
     session=$(crew_meta_field "$slug" herdr_session)
-    herdr pane read "$pane" --source recent --lines "$lines" --session "$session"
+    backend_pane_read "$session" "$pane" "$lines"
 }
 
 crew_send() {
@@ -1021,8 +1022,371 @@ crew_send() {
     shift
     pane=$(crew_meta_field "$slug" herdr_pane)
     session=$(crew_meta_field "$slug" herdr_session)
-    herdr pane send-text "$pane" "$*" --session "$session"
-    herdr pane send-keys "$pane" enter --session "$session"
+    chat_append "$(repo_root)" "$slug" primary "$*"
+    backend_pane_send "$session" "$pane" "$*"
+}
+
+# --- backend seam -----------------------------------------------------------
+# All session-backend interactions go through backend_* wrappers so a future
+# backend (tmux, zellij, ...) can be added by implementing these cases without
+# touching the command functions. Only "herdr" is implemented today.
+
+backend_kind() {
+    printf '%s' "${AK_BACKEND:-herdr}"
+}
+
+backend_require() {
+    case "$(backend_kind)" in
+    herdr)
+        need herdr >/dev/null
+        ;;
+    *)
+        printf 'unsupported AK_BACKEND: %s (only "herdr" is implemented)\n' "$(backend_kind)" >&2
+        exit 1
+        ;;
+    esac
+}
+
+backend_notify() {
+    session=$1
+    title=$2
+    body=$3
+    [ "${AK_NO_NOTIFY:-0}" = 1 ] && return 0
+    case "$(backend_kind)" in
+    herdr)
+        command -v herdr >/dev/null 2>&1 || return 0
+        herdr notification show "$title" --body "$body" --sound done --session "$session" >/dev/null 2>&1 || true
+        ;;
+    *) return 0 ;;
+    esac
+}
+
+backend_wake() {
+    session=$1
+    target=$2
+    message=$3
+    case "$(backend_kind)" in
+    herdr)
+        command -v herdr >/dev/null 2>&1 || return 1
+        # Prefer the agent surface, which honors the pane's live
+        # bracketed-paste mode so the submit Enter is not swallowed. Fall back
+        # to raw pane input only for a plain (non-agent) shell pane.
+        if herdr agent prompt "$target" "$message" --session "$session" >/dev/null 2>&1; then
+            return 0
+        fi
+        if herdr pane send-text "$target" "$message" --session "$session" >/dev/null 2>&1; then
+            herdr pane send-keys "$target" enter --session "$session" >/dev/null 2>&1 || true
+            return 0
+        fi
+        return 1
+        ;;
+    *) return 1 ;;
+    esac
+}
+
+backend_pane_read() {
+    session=$1
+    pane=$2
+    lines=$3
+    case "$(backend_kind)" in
+    herdr) herdr pane read "$pane" --source recent --lines "$lines" --session "$session" ;;
+    *) backend_require ;;
+    esac
+}
+
+backend_pane_send() {
+    session=$1
+    pane=$2
+    message=$3
+    case "$(backend_kind)" in
+    herdr)
+        herdr pane send-text "$pane" "$message" --session "$session" || return 1
+        herdr pane send-keys "$pane" enter --session "$session" || return 1
+        ;;
+    *) backend_require ;;
+    esac
+}
+
+backend_agent_status() {
+    session=$1
+    pane=$2
+    case "$(backend_kind)" in
+    herdr)
+        [ -n "$pane" ] && [ -n "$session" ] && command -v herdr >/dev/null 2>&1 || {
+            printf 'unknown'
+            return 0
+        }
+        herdr agent get "$pane" --session "$session" 2>/dev/null | jq -r '.result.agent.agent_status // .error.code // "unknown"' 2>/dev/null || printf 'unknown'
+        ;;
+    *) printf 'unknown' ;;
+    esac
+}
+
+backend_tab_close() {
+    session=$1
+    tab=$2
+    case "$(backend_kind)" in
+    herdr) herdr tab close "$tab" --session "$session" >/dev/null 2>&1 ;;
+    *) backend_require ;;
+    esac
+}
+
+# --- roles ------------------------------------------------------------------
+
+role_marker_path() {
+    printf '%s/.agent-kit/role' "$(repo_root)"
+}
+
+role_field() {
+    marker=$1
+    field=$2
+    awk -F= -v f="$field" '$1==f {print substr($0, index($0,"=")+1); exit}' "$marker"
+}
+
+is_worker() {
+    marker=$(role_marker_path 2>/dev/null) || return 1
+    [ -f "$marker" ] && grep -q '^role=worker$' "$marker" 2>/dev/null
+}
+
+ak_role() {
+    if is_worker; then
+        printf 'worker\n'
+    else
+        printf 'primary\n'
+    fi
+}
+
+require_worker_marker() {
+    if ! is_worker; then
+        printf 'not a worker checkout: no worker role marker here.\n' >&2
+        printf 'run this from inside a crew worktree created by ak crew-spawn.\n' >&2
+        exit 1
+    fi
+    role_marker_path
+}
+
+ak_whoami() {
+    role=$(ak_role)
+    printf 'role: %s\n' "$role"
+    if [ "$role" = worker ]; then
+        marker=$(role_marker_path)
+        printf 'slug: %s\n' "$(role_field "$marker" slug)"
+        printf 'primary_repo: %s\n' "$(role_field "$marker" primary_repo)"
+        printf 'primary_session: %s\n' "$(role_field "$marker" primary_session)"
+        printf 'primary_target: %s\n' "$(role_field "$marker" primary_target)"
+    else
+        if primary_target >/dev/null 2>&1; then
+            printf 'primary_target: %s\n' "$(primary_target)"
+            printf 'primary_session: %s\n' "$(primary_session 2>/dev/null || printf '%s' "${AK_HERDR_SESSION:-default}")"
+        else
+            printf 'primary_target: (not registered; run ak primary-set)\n'
+        fi
+    fi
+    printf 'backend: %s\n' "$(backend_kind)"
+    printf 'phase: %s\n' "$(phase_current 2>/dev/null || printf '(unset)')"
+}
+
+# --- phase ------------------------------------------------------------------
+
+phase_path() {
+    printf '%s/phase' "$(agentkit_dir)"
+}
+
+phase_current() {
+    p=$(phase_path)
+    [ -f "$p" ] || return 1
+    awk -F= '$1=="phase" {print substr($0, index($0,"=")+1); exit}' "$p"
+}
+
+phase_valid() {
+    case "$1" in
+    research | planning | awaiting-approval | implementing | testing | done) return 0 ;;
+    *) return 1 ;;
+    esac
+}
+
+phase_show() {
+    if cur=$(phase_current 2>/dev/null); then
+        printf '%s\n' "$cur"
+    else
+        printf '(unset)\n'
+    fi
+}
+
+phase_set() {
+    [ "$#" -ge 1 ] || {
+        printf 'usage: bin/ak phase set <phase>\n' >&2
+        printf 'phases: research planning awaiting-approval implementing testing done\n' >&2
+        exit 2
+    }
+    new=$1
+    if ! phase_valid "$new"; then
+        printf 'invalid phase: %s\n' "$new" >&2
+        printf 'phases: research planning awaiting-approval implementing testing done\n' >&2
+        exit 2
+    fi
+    ensure_runtime_ignored
+    mkdir -p "$(agentkit_dir)"
+    cat >"$(phase_path)" <<EOF
+phase=$new
+updated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+    printf 'phase: %s\n' "$new"
+}
+
+ak_phase() {
+    sub=${1:-show}
+    case "$sub" in
+    show)
+        phase_show
+        ;;
+    set)
+        shift 2>/dev/null || true
+        phase_set "$@"
+        ;;
+    *)
+        # allow "ak phase implementing" shorthand for "ak phase set implementing"
+        phase_set "$sub"
+        ;;
+    esac
+}
+
+# --- primary/worker chatbox -------------------------------------------------
+
+chat_path() {
+    printf '%s/.agent-kit/crew/%s/chat.log' "$1" "$2"
+}
+
+chat_append() {
+    root=$1
+    slug=$2
+    who=$3
+    shift 3
+    msg=$*
+    log=$(chat_path "$root" "$slug")
+    mkdir -p "$(dirname "$log")" 2>/dev/null || return 0
+    msg=$(printf '%s' "$msg" | tr '\t\n' '  ')
+    printf '%s\t%s\t%s\n' "$who" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$msg" >>"$log"
+}
+
+chat_render() {
+    log=$1
+    lines=${2:-200}
+    [ -f "$log" ] || {
+        printf 'no chat log: %s\n' "$log"
+        return 0
+    }
+    tail -n "$lines" "$log" | while IFS="$(printf '\t')" read -r who ts msg; do
+        printf '[%s] %s: %s\n' "$ts" "$who" "$msg"
+    done
+}
+
+ak_chat() {
+    if is_worker; then
+        marker=$(role_marker_path)
+        root=$(role_field "$marker" primary_repo)
+        slug=$(role_field "$marker" slug)
+        lines=${1:-200}
+        chat_render "$(chat_path "$root" "$slug")" "$lines"
+        return 0
+    fi
+    [ "$#" -ge 1 ] || {
+        printf 'usage (primary): bin/ak chat <slug> [lines]\n' >&2
+        exit 2
+    }
+    slug=$(slugify "$1")
+    lines=${2:-200}
+    root=$(repo_root)
+    chat_render "$(chat_path "$root" "$slug")" "$lines"
+}
+
+# reply: worker -> primary, mid-task (no completion). Wakes the primary.
+ak_reply() {
+    [ "$#" -ge 1 ] || {
+        printf 'usage: bin/ak reply <message text...>\n' >&2
+        exit 2
+    }
+    marker=$(require_worker_marker)
+    slug=$(role_field "$marker" slug)
+    proot=$(role_field "$marker" primary_repo)
+    psession=$(role_field "$marker" primary_session)
+    ptarget=$(role_field "$marker" primary_target)
+    msg=$*
+    chat_append "$proot" "$slug" worker "$msg"
+    if [ -n "$ptarget" ]; then
+        backend_wake "$psession" "$ptarget" "crew $slug: $msg" >/dev/null 2>&1 || true
+        printf 'replied to primary and sent wake: %s\n' "$slug"
+    else
+        printf 'replied (logged to chat); no primary target recorded to wake\n'
+    fi
+}
+
+# done: worker completion. Writes the report against the primary repo and wakes
+# the primary. Runnable from the worker's own worktree.
+ak_done() {
+    [ "$#" -ge 1 ] || {
+        printf 'usage: bin/ak done <message text...>\n' >&2
+        exit 2
+    }
+    marker=$(require_worker_marker)
+    slug=$(role_field "$marker" slug)
+    proot=$(role_field "$marker" primary_repo)
+    [ -n "$proot" ] && [ -d "$proot" ] || {
+        printf 'recorded primary_repo is missing: %s\n' "$proot" >&2
+        exit 1
+    }
+    chat_append "$proot" "$slug" worker "$*"
+    crew_report_core "$proot" "$slug" "$*"
+}
+
+# --- root-scoped primary lookup (works from any checkout) --------------------
+
+primary_field_at() {
+    root=$1
+    field=$2
+    p="$root/.agent-kit/primary"
+    [ -f "$p" ] || return 1
+    awk -F= -v f="$field" '$1==f {print substr($0, index($0,"=")+1); exit}' "$p"
+}
+
+# crew_report_core: shared report + wake path, parameterized by the PRIMARY
+# repo root so it works whether called by the primary (repo_root) or by a
+# worker via `ak done` (primary_repo from the worker role marker).
+crew_report_core() {
+    root=$1
+    slug=$2
+    shift 2
+    message=$*
+    crewdir="$root/.agent-kit/crew/$slug"
+    meta="$crewdir/meta"
+    [ -f "$meta" ] || {
+        printf 'unknown crew: %s\n' "$slug" >&2
+        exit 1
+    }
+    report="$crewdir/report.md"
+    mkdir -p "$crewdir"
+    {
+        printf '# Crew report: %s\n\n' "$slug"
+        printf '## Outcome\n\n%s\n\n' "$message"
+        printf '## Files changed\n\n- see worktree\n\n'
+        printf '## Checks\n\n- pending or included above\n\n'
+        printf '## Cost\n\n- see cost.tsv or included above\n\n'
+        printf '## Notes\n\n- reported_at: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } >"$report"
+    reported_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    printf 'state=reported\nreported_at=%s\n' "$reported_at" >"$crewdir/state"
+    inbox="$root/.agent-kit/inbox"
+    mkdir -p "$inbox"
+    printf '# Crew update: %s\n\n- reported_at: %s\n- report: %s\n\n%s\n' "$slug" "$reported_at" "$report" "$message" >"$inbox/${reported_at}-$slug.md"
+    session=$(primary_field_at "$root" session 2>/dev/null || printf '%s' "${AK_HERDR_SESSION:-default}")
+    inject=$(primary_field_at "$root" inject 2>/dev/null || printf 1)
+    target=$(primary_field_at "$root" target 2>/dev/null || true)
+    backend_notify "$session" "agent-kit crew update" "crew $slug: $message"
+    if [ "${AK_NO_WAKE:-0}" != 1 ] && [ "${inject:-1}" = 1 ] && [ -n "$target" ]; then
+        backend_wake "$session" "$target" "crew $slug: $message" >/dev/null 2>&1 || true
+    fi
+    printf 'crew reported: %s\n' "$slug"
+    printf 'report: %s\n' "$report"
 }
 
 cmd=${1:-}
@@ -1046,6 +1410,30 @@ lavish)
 herdr-tab)
     shift
     herdr_tab "$@"
+    ;;
+role)
+    shift
+    ak_role "$@"
+    ;;
+whoami)
+    shift
+    ak_whoami "$@"
+    ;;
+phase)
+    shift
+    ak_phase "$@"
+    ;;
+reply)
+    shift
+    ak_reply "$@"
+    ;;
+done)
+    shift
+    ak_done "$@"
+    ;;
+chat)
+    shift
+    ak_chat "$@"
     ;;
 primary-set)
     shift

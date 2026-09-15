@@ -28,13 +28,21 @@ bin/ak primary-show
 
 ## Crew handback
 
-When a crew is ready to hand back, it runs:
+When a crew is ready to hand back, the preferred command — runnable from inside the worker's own worktree — is:
+
+```sh
+bin/ak done "summary, changed files, checks, blockers"
+```
+
+`ak done` resolves the crew slug and primary target from the worker role marker (`.agent-kit/role`), writes the report against the primary repo, appends the shared chat transcript, and wakes the primary. Use `bin/ak reply "<message>"` for a mid-task question/status that wakes the primary without ending the task, and `bin/ak chat` to read the transcript.
+
+The equivalent primary-repo-rooted command (used by older crews, or when running from the primary repo) is:
 
 ```sh
 bin/ak crew-report <slug> "summary, changed files, checks, blockers"
 ```
 
-That command:
+Both go through the same core. That command:
 
 - writes `.agent-kit/crew/<slug>/report.md`
 - appends `.agent-kit/inbox/<timestamp>-<slug>.md`

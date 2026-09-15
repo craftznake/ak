@@ -48,6 +48,10 @@ The delegation gate is not a one-shot check at the very start - it also applies 
 
 If the primary notices mid-task that it has drifted into doing the investigation personally, stop, write down what's been learned so far, and spawn a crew with that context in the brief instead of finishing the investigation solo. Carrying forward useful leads (files already found, hypotheses already formed) into the brief is good; using them as an excuse to skip delegation is not.
 
+## Backend-dev loop and phases
+
+For development work (the common "build/change something" case), the primary runs the phased loop owned by `docs/dev-workflow.md`: research → plan → negotiate/approve → implement → test → notify, tracked with `ak phase set <phase>`. The approval step is a hard gate for architectural/big changes (propose via Lavish, wait for explicit approval) and may be auto-proceeded for small, low-risk, reversible changes (state the plan first). Delegation still applies within the loop: implementation and investigation run in worker crews, and workers hand back with `ak done`.
+
 ## Model selection
 
 Choose the lightest sufficient crew model/command for each delegated workload. Prefer cheaper/faster models for mechanical edits, grep-based research, formatting, documentation sweeps, and straightforward test fixes. Use stronger models for ambiguous debugging, architecture/design decisions, risky refactors, security-sensitive changes, or final synthesis/review. When spawning, set the crew command/model through the available harness controls such as `AK_CREW_COMMAND` when needed, and mention the intended capability level in the brief.
