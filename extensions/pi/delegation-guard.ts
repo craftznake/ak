@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { ExtensionAPI, ToolResultEvent } from "@earendil-works/pi-coding-agent";
 
 // delegation-guard: a mechanical nudge/escalation for the DIRECT/DELEGATE
@@ -6,6 +8,15 @@ import type { ExtensionAPI, ToolResultEvent } from "@earendil-works/pi-coding-ag
 // stops a primary agent from quietly doing multi-file investigative or
 // implementation work itself instead of spawning a crew via
 // `ak crew-spawn`.
+//
+// The gate is a PRIMARY-only concept (docs/roles-model.md): a worker crew is
+// already the delegated unit of work and is expected to read/grep/bash its
+// way through its brief without further self-delegation. So this extension
+// detects the worker role marker (`.agent-kit/role` with `role=worker`,
+// written by `ak crew-spawn` into the crew's worktree) at session start and
+// fully disables itself for worker sessions - no counting, no reminders, no
+// status. Primary sessions (the common/default case: no marker found) keep
+// the existing soft/hard nudge behavior unchanged.
 //
 // This extension tracks a rolling count of "investigative" tool calls
 // (read, grep, find, ls, and bash/powershell commands that look like
@@ -70,6 +81,30 @@ function isCrewSpawnToolResult(event: ToolResultEvent): boolean {
     return CREW_SPAWN_RE.test(command);
 }
 
+// Mirrors bin/ak's is_worker(): a checkout is a worker iff
+// `<repo_root>/.agent-kit/role` exists and contains `role=worker`. Walk up
+// from cwd looking for `.agent-kit/role` (worktree root, the common case),
+// stopping at a repo boundary (`.git` or `.jj`) or the filesystem root.
+function isWorkerCwd(cwd: string): boolean {
+    let dir = cwd;
+    for (let i = 0; i < 64; i++) {
+        const markerPath = join(dir, ".agent-kit", "role");
+        if (existsSync(markerPath)) {
+            try {
+                const content = readFileSync(markerPath, "utf8");
+                return /^role=worker$/m.test(content);
+            } catch {
+                return false;
+            }
+        }
+        if (existsSync(join(dir, ".git")) || existsSync(join(dir, ".jj"))) return false;
+        const parent = dirname(dir);
+        if (parent === dir) return false;
+        dir = parent;
+    }
+    return false;
+}
+
 function extractAssistantText(message: unknown): string {
     const msg = message as { role?: string; content?: unknown };
     if (msg?.role !== "assistant" || !Array.isArray(msg.content)) return "";
@@ -94,6 +129,12 @@ export default function delegationGuard(pi: ExtensionAPI) {
     let nextSoftAt = softThreshold;
     let nextHardAt = hardThreshold;
     let confirmInFlight = false;
+    // Determined at session_start from the worker role marker
+    // (.agent-kit/role). Worker sessions are the delegated unit of work and
+    // are expected to run to completion without further self-delegation
+    // nudges, so the guard fully disables itself for them. Defaults to
+    // false (primary behavior) until the first session_start resolves it.
+    let isWorker = false;
 
     function resetCounters() {
         sinceReset = 0;
@@ -103,21 +144,27 @@ export default function delegationGuard(pi: ExtensionAPI) {
 
     function updateStatus(ctx: { hasUI: boolean; ui: { setStatus(key: string, text: string | undefined): void } }) {
         if (!ctx.hasUI) return;
-        ctx.ui.setStatus("delegation-guard", sinceReset > 0 ? `delegation-gate: ${sinceReset}/${nextHardAt}` : undefined);
+        ctx.ui.setStatus(
+            "delegation-guard",
+            !isWorker && sinceReset > 0 ? `delegation-gate: ${sinceReset}/${nextHardAt}` : undefined,
+        );
     }
 
     pi.on("session_start", (_event, ctx) => {
+        isWorker = isWorkerCwd(ctx.cwd ?? process.cwd());
         resetCounters();
         updateStatus(ctx);
     });
 
     pi.on("message_end", (event) => {
+        if (isWorker) return;
         if (DIRECT_JUSTIFICATION_RE.test(extractAssistantText(event.message))) {
             resetCounters();
         }
     });
 
     pi.on("tool_result", async (event, ctx) => {
+        if (isWorker) return;
         if (isCrewSpawnToolResult(event)) {
             if (!event.isError) resetCounters();
             updateStatus(ctx);
@@ -189,6 +236,11 @@ export default function delegationGuard(pi: ExtensionAPI) {
     pi.registerCommand("delegation-guard", {
         description: "Show or reset delegation-gate guard counters (usage: /delegation-guard [status|reset])",
         handler: async (args, ctx) => {
+            if (isWorker) {
+                ctx.ui.notify("Delegation-gate guard is disabled for worker sessions.", "info");
+                return;
+            }
+
             const arg = args.trim().toLowerCase();
             if (arg === "reset") {
                 resetCounters();

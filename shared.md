@@ -17,7 +17,7 @@ On the first substantive turn of a session, determine your role before doing wor
 - If **primary** and not yet registered for this repo/session, run `ak primary-set`.
 - If **worker**, read your brief at `.agent-kit/crew/<slug>/brief.md`, follow the worker contract, and when finished run `ak done "<summary>"` (from your worktree) to report and wake the primary. Use `ak reply "<message>"` to talk to the primary mid-task, and `ak chat` to read the shared transcript.
 
-`docs/roles-model.md` owns role detection, the worker marker, and the primary/worker chatbox.
+Run `ak docs show roles-model` to read the full spec (works from any repo).
 
 ## Deterministic workflow
 
@@ -39,7 +39,7 @@ For "build/change something" work, the primary runs a phased loop: **research �
 - **Lavish trigger:** use Lavish when the change touches architecture or is a big change; use plain text otherwise.
 - **Implement via workers**, **test as its own phase**, then **notify** the user with the outcome (what changed, checks, residual risk, and any decision such as merge approval). Merge and destructive actions stay the user's explicit decision.
 
-`docs/dev-workflow.md` owns this loop in detail.
+Run `ak docs show dev-workflow` to read the full spec (works from any repo).
 
 ## Version control
 
@@ -57,20 +57,22 @@ For "build/change something" work, the primary runs a phased loop: **research �
 
 ## Operational docs
 
-Treat `docs/` as the detailed operating spec, not just human prose:
+Treat the ak toolkit's `docs/` as the detailed operating spec, not just human prose.
+Run `ak docs list` to see all available docs and `ak docs show <name>` to read one in
+full - this works from any repo/cwd, since it resolves the ak checkout by following
+the `ak` command's own symlink, not the caller's project root.
 
-- `docs/onboarding.md` owns global/per-repo setup.
-- `docs/roles-model.md` owns primary/worker role detection, the worker marker, and the primary/worker chatbox.
-- `docs/dev-workflow.md` owns the backend-dev loop (research → plan → approve → implement → test → notify) and phases.
-- `docs/primary-agent-model.md` owns when and how the primary delegates.
-- `docs/herdr-workflow.md` owns Herdr usage and visible crew layout.
-- `docs/reporting-model.md` owns push reporting from crews to the primary.
-- `docs/supervision-model.md` owns primary supervision commands and loop.
-- `docs/safety-model.md` owns cleanup, dirty-worktree, and destructive-action boundaries.
-- `docs/vcs-workflow.md` owns jj/git workspace, worktree, bookmark/branch, and crew cleanup behavior.
-- `docs/deterministic-workflow.md` owns the engineering loop.
+- `roles-model` owns primary/worker role detection, the worker marker, and the primary/worker chatbox.
+- `dev-workflow` owns the backend-dev loop (research → plan → approve → implement → test → notify) and phases.
+- `primary-agent-model` owns when and how the primary delegates.
+- `herdr-workflow` owns Herdr usage and visible crew layout.
+- `reporting-model` owns push reporting from crews to the primary.
+- `supervision-model` owns primary supervision commands and loop.
+- `safety-model` owns cleanup, dirty-worktree, and destructive-action boundaries.
+- `vcs-workflow` owns jj/git workspace, worktree, bookmark/branch, and crew cleanup behavior.
+- `deterministic-workflow` owns the engineering loop.
 
-Before changing or extending one of these workflows, read the owning doc first.
+Before changing or extending one of these workflows, run `ak docs show <name>` and read the owning doc first.
 
 ## Primary agent / crew workflow
 

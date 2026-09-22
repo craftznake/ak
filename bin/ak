@@ -27,6 +27,7 @@ Usage:
   ak crew-send <slug> <message text...>
   ak chat [<slug>] [lines]
   ak crew-finish <slug> [report text...]
+  ak docs [list|show <name>]
 
 Worker commands (run from inside a crew worktree):
   ak reply <message text...>   message the primary mid-task and wake it
@@ -76,6 +77,83 @@ self_path() {
         (cd "$dir" 2>/dev/null && printf '%s/%s\n' "$PWD" "$base") || printf '%s\n' "$0"
         ;;
     *) command -v "$0" 2>/dev/null || printf '%s\n' "$0" ;;
+    esac
+}
+
+# Follow a chain of symlinks to their final target, POSIX-portable (no
+# dependency on GNU readlink -f / coreutils realpath being installed).
+resolve_symlink_chain() {
+    path=$1
+    n=0
+    while [ -L "$path" ] && [ "$n" -lt 40 ]; do
+        link=$(readlink "$path")
+        case "$link" in
+        /*) path=$link ;;
+        *) path=$(cd "$(dirname "$path")" && cd "$(dirname "$link")" && pwd)/$(basename "$link") ;;
+        esac
+        n=$((n + 1))
+    done
+    printf '%s\n' "$path"
+}
+
+# Root of the ak toolkit checkout itself (containing bin/ak and docs/),
+# resolved from this script's own symlink chain. This is independent of the
+# caller's cwd/repo, so "ak docs ..." works the same from any repository -
+# unlike repo_root(), which walks the *caller's* jj/git root for .agent-kit
+# state.
+ak_home_dir() {
+    p=$(resolve_symlink_chain "$(self_path)")
+    dirname "$(dirname "$p")"
+}
+
+docs_dir() {
+    printf '%s/docs' "$(ak_home_dir)"
+}
+
+docs_list() {
+    dir=$(docs_dir)
+    [ -d "$dir" ] || {
+        printf 'no docs directory: %s\n' "$dir" >&2
+        exit 1
+    }
+    for f in "$dir"/*.md; do
+        [ -f "$f" ] || continue
+        basename "$f" .md
+    done
+}
+
+docs_show() {
+    [ "$#" -ge 1 ] || {
+        printf 'usage: ak docs show <name>\n' >&2
+        exit 2
+    }
+    name=$1
+    name=${name%.md}
+    dir=$(docs_dir)
+    path="$dir/$name.md"
+    [ -f "$path" ] || {
+        printf 'unknown doc: %s\n' "$name" >&2
+        printf 'available docs:\n' >&2
+        docs_list >&2
+        exit 1
+    }
+    cat "$path"
+}
+
+ak_docs() {
+    sub=${1:-list}
+    case "$sub" in
+    list)
+        docs_list
+        ;;
+    show)
+        shift
+        docs_show "$@"
+        ;;
+    *)
+        # shorthand: ak docs <name> == ak docs show <name>
+        docs_show "$sub"
+        ;;
     esac
 }
 
@@ -1515,6 +1593,10 @@ crew-send)
 crew-finish)
     shift
     crew_finish "$@"
+    ;;
+docs)
+    shift
+    ak_docs "$@"
     ;;
 -h | --help | help | '') usage ;;
 *)

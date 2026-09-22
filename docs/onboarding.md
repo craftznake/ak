@@ -36,22 +36,22 @@ For opencode with an existing config, `install.sh` will merge this repo's `openc
 From the repo you are working in:
 
 ```sh
-/path/to/agent-kit/ak doctor
-/path/to/agent-kit/ak init
-/path/to/agent-kit/ak primary-set
+ak doctor
+ak init
+ak primary-set
 ```
 
 Then talk to the primary agent normally. For multi-step work it can spawn crews:
 
 ```sh
-/path/to/agent-kit/ak crew-spawn fix-login "stabilize flaky login test"
-```
+ak crew-spawn fix-login "stabilize flaky login test"
+
 
 Crews report back with:
 
 ```sh
-/path/to/agent-kit/ak crew-report fix-login "fixed, tests passed, ready for review"
-```
+ak crew-report fix-login "fixed, tests passed, ready for review"
+
 
 ## Shell convenience
 
@@ -98,9 +98,9 @@ git submodule add <your-agent-kit-repo-url> tools/agent-kit
 Then project agents can use:
 
 ```sh
-tools/agent-kit/ak init
-tools/agent-kit/ak primary-set
-tools/agent-kit/ak crew-spawn <slug> "<brief>"
+ak init
+ak primary-set
+ak crew-spawn <slug> "<brief>"
 ```
 
 This is better when the project team wants the same helper scripts and docs.

@@ -10,6 +10,23 @@ It does not implement or change the delegation policy itself. It only makes
 the existing "classify DIRECT vs DELEGATE before non-trivial tool use" rule
 harder to silently ignore inside a pi session.
 
+## Primary-only: disabled for workers
+
+The delegation gate is a primary-only concept (`docs/roles-model.md`): a
+worker crew is already the delegated unit of work and is expected to
+read/grep/bash its way through its brief to completion without further
+self-delegation. Nudging a worker to run `ak crew-spawn` every few
+investigative calls is not useful advice for its role.
+
+At `session_start`, the extension checks for the worker role marker
+(`<repo_root>/.agent-kit/role` containing `role=worker`, written by `ak
+crew-spawn` into the crew's worktree - the same detection `ak role` uses)
+by walking up from `ctx.cwd`. If found, the guard fully disables itself for
+that session: no counting, no soft/hard reminders, no status line, and
+`/delegation-guard` reports that the guard is disabled instead of counters.
+Primary sessions (the default: no marker found) keep the existing
+soft/hard nudge behavior unchanged.
+
 ## What it does
 
 The extension counts "investigative" tool results since the last reset:
@@ -102,6 +119,11 @@ installed manually).
   word "DIRECT" without a real whitelist justification. This mirrors the
   existing honor-system nature of the prose gate; the guard's job is to
   surface the reminder, not to grade the justification text.
+- **Worker detection is a filesystem walk from `ctx.cwd` at `session_start`
+  only.** If a session changes cwd across worktrees mid-session (uncommon,
+  but possible via `/resume` into a different worktree) without a fresh
+  `session_start`, the guard keeps whatever role it detected at the last
+  `session_start` rather than re-checking per tool call.
 - **Hard-threshold dialog only appears with UI.** `-p` (print mode) and
   `--mode json` runs cannot show `ctx.ui.confirm(...)`, so the hard
   threshold falls back to another steering message there. This was verified
