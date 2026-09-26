@@ -78,12 +78,12 @@ Before changing or extending one of these workflows, run `ak docs show <name>` a
 
 - The user likes talking to one primary agent that autonomously delegates suitable work to crews.
 - Use the project-local helper when present (`ak`); otherwise use the globally installed `ak` command.
-- Mandatory delegation gate: before non-trivial tool use, classify the task as `DIRECT` or `DELEGATE`.
-  - `DIRECT` is allowed only for truly tiny direct answers, immediate clarification, purely conversational replies, or trivial low-risk edits where delegation overhead would exceed the work.
-  - `DELEGATE` is required for investigative, research, comparison, architecture, scaffolding, risky, multi-step, cross-file, long-running, review/audit, or otherwise separable work.
-  - If a task looks non-trivial but remains `DIRECT`, state the whitelist reason before doing tool work.
+- <HARD-GATE> Mandatory delegation gate: before non-trivial tool use, classify the task as `DIRECT` or `DELEGATE`. This is NOT negotiable. You cannot rationalize your way out of this gate.
+  - `DIRECT` is allowed ONLY for truly tiny direct answers, immediate clarification, purely conversational replies, or trivial low-risk edits where delegation overhead would exceed the work.
+  - `DELEGATE` is REQUIRED for investigative, research, comparison, architecture, scaffolding, risky, multi-step, cross-file, long-running, review/audit, or otherwise separable work.
+  - If a task looks non-trivial but remains `DIRECT`, you MUST state the whitelist reason before doing tool work. If you cannot articulate a convincing whitelist reason, it is `DELEGATE`. </HARD-GATE>
   - Long-running investigation (root-causing a crash/bug, tracing behavior across multiple files or repos, comparing versions, reproducing a failure) is always `DELEGATE`, even if the primary already started poking around. Do not let "just a bit more digging" turn into personally doing the crew's job - the moment orientation turns into the actual investigation, stop and spawn a crew with what's been learned so far as context in the brief.
-- For `DELEGATE` work, act as the primary: state a short dispatch plan, run `ak primary-set`/`ak primary-set` if not already registered for this repo/session, then spawn one or more crews with `ak crew-spawn`/`ak crew-spawn` before doing the substantive work yourself.
+- For `DELEGATE` work, act as the primary: state a short dispatch plan, run `ak primary-set` if not already registered for this repo/session, then spawn one or more crews with `ak crew-spawn` before doing the substantive work yourself.
 - Keep the primary focused on intake, supervision, synthesis, final review, and user decisions; do not let the primary become the default implementer/researcher for delegatable work.
 - Choose the lightest sufficient crew model/command for the workload; use stronger models only for complex architecture, risky refactors, ambiguous debugging, or final synthesis/review.
 - The user prefers Herdr as the visible multiplexer.

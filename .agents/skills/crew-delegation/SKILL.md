@@ -14,6 +14,17 @@ Delegate by default. Spawn crews for any work that is parallelizable, investigat
 
 Do not spawn only for truly tiny direct answers, immediate clarification, or trivial low-risk edits where delegation overhead would exceed the work.
 
+## Common rationalizations
+
+These thoughts mean STOP — you are rationalizing:
+
+| Excuse | Reality |
+|--------|---------|
+| "This is a simple investigation" | Simple things become complex. Spawn a crew. |
+| "I can just grep this myself" | That is delegatable research. Spawn a crew. |
+| "Delegation overhead exceeds the work" | The overhead is one command. Context pollution risk is higher. |
+| "I will just do this one thing first" | That is how scope creep starts. Delegate now. |
+
 ## Model selection
 
 Choose the lightest sufficient crew model/command for each workload:
@@ -21,6 +32,14 @@ Choose the lightest sufficient crew model/command for each workload:
 - cheap/fast model: mechanical edits, docs, grep-based research, simple test fixes, formatting, rote migrations
 - mid model: normal feature work, moderate debugging, cross-file edits, test stabilization
 - strong model: ambiguous root-cause analysis, architecture, risky refactors, security-sensitive work, final synthesis/review
+
+### Task-category mapping
+
+| Task type | Model tier | Examples |
+|-----------|------------|----------|
+| Mechanical / 1-2 files with complete spec | cheap | Rename a symbol, update a doc, fix a linter warning, add a simple config field |
+| Multi-file with integration | mid / standard | Cross-cutting refactor, test stabilization across modules, moderate feature work |
+| Architecture / design judgment, ambiguous root-cause, security, final synthesis | strong | System design, root-cause debugging, auth/crypto changes, crew report review |
 
 Use harness controls such as `AK_CREW_COMMAND='pi --model <model>' bin/ak crew-spawn ...` when available. If the exact model flag differs by harness, choose the appropriate command for that harness. Mention the intended capability level in the crew brief.
 

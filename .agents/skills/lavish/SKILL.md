@@ -8,6 +8,12 @@ argument-hint: <what to visualize>
 
 Use this skill when a response is easier to review visually than as prose.
 
+| Excuse | Reality |
+|--------|---------|
+| "I will just describe it in text" | Prose is harder to review than a visual artifact. Use Lavish. |
+| "This is not complex enough for Lavish" | If it is decision-heavy or multi-part, it qualifies. |
+| "The user did not ask for an artifact" | This skill exists to trigger proactively. Use it. |
+
 1. Create an HTML artifact under `.lavish/`.
 2. Open it with:
 

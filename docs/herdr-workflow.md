@@ -48,6 +48,23 @@ The wrapper refuses Herdr operations when `herdr` is missing; it does not silent
 
 For an `AK_CREW_COMMAND` that is an arbitrary command (not a recognized agent kind), `crew-spawn` keeps using `herdr pane run` as before, then polls `herdr agent get` briefly for Herdr's own agent auto-detection before submitting the startup prompt (via `herdr agent prompt` if an agent is detected, otherwise via raw `herdr pane send-text` + `herdr pane send-keys enter` as a last resort).
 
+## Progress ledger
+
+For long-running crews, use checkpoints to record completed items that survive session changes:
+
+```sh
+ak crew-checkpoint fix-login "diagnosed flaky auth token refresh"
+ak crew-checkpoint fix-login "fixed token expiry window"
+ak crew-resume fix-login
+```
+
+`crew-checkpoint` appends a timestamped line to `.agent-kit/crew/<slug>/progress.tsv`. `crew-resume` prints the full ledger so a new session (or the primary) can see what has already been completed.
+
+Use checkpoints when:
+- A crew spans multiple sessions.
+- The primary needs visibility into incremental progress.
+- A compacted or restarted crew needs to pick up where it left off.
+
 ## Safety boundaries
 
 - Herdr is presentation/coordination, not authority.

@@ -20,7 +20,9 @@ Usage:
   ak crew-status
   ak crew-audit
   ak crew-report <slug> <message text...>
+  ak crew-resume <slug>
   ak crew-cost <slug> <usd|unknown> [note...]
+  ak crew-checkpoint <slug> <item text...>
   ak crew-cost-summary
   ak crew-cost-prompt [message...]
   ak crew-peek <slug> [lines]
@@ -622,6 +624,10 @@ crew_cost_path() {
     printf '%s/cost.tsv' "$(crew_dir "$1")"
 }
 
+crew_progress_path() {
+  printf '%s/progress.tsv' "$(crew_dir "$1")"
+}
+
 crew_branch_name() {
     printf 'ak/%s' "$1"
 }
@@ -904,6 +910,23 @@ crew_audit() {
     done
 }
 
+crew_checkpoint() {
+  [ "$#" -ge 2 ] || { printf 'usage: ak crew-checkpoint <slug> <item text...>\n' >&2; exit 2; }
+  slug=$(slugify "$1")
+  shift
+  meta=$(crew_meta_path "$slug")
+  [ -f "$meta" ] || { printf 'unknown crew: %s\n' "$slug" >&2; exit 1; }
+  prog=$(crew_progress_path "$slug")
+  mkdir -p "$(dirname "$prog")"
+  if [ ! -f "$prog" ]; then
+    printf 'timestamp\titem\n' >"$prog"
+  fi
+  item=$*
+  item=$(printf '%s' "$item" | tr '\t\n' '  ')
+  printf '%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$item" >>"$prog"
+  printf 'crew checkpoint: %s\n' "$slug"
+}
+
 crew_cost() {
     [ "$#" -ge 2 ] || {
         printf 'usage: ak crew-cost <slug> <usd|unknown> [note...]\n' >&2
@@ -1001,6 +1024,20 @@ crew_report() {
     root=$(repo_root)
     chat_append "$root" "$slug" worker "report: $*"
     crew_report_core "$root" "$slug" "$*"
+}
+
+crew_resume() {
+  [ "$#" -ge 1 ] || { printf 'usage: ak crew-resume <slug>\n' >&2; exit 2; }
+  slug=$(slugify "$1")
+  meta=$(crew_meta_path "$slug")
+  [ -f "$meta" ] || { printf 'unknown crew: %s\n' "$slug" >&2; exit 1; }
+  prog=$(crew_progress_path "$slug")
+  if [ ! -f "$prog" ] || [ $(wc -l <"$prog") -le 1 ]; then
+    printf 'no checkpoints for crew: %s\n' "$slug"
+  else
+    printf '## Progress: %s\n\n' "$slug"
+    awk -F'\t' 'NR==1 {printf "%-20s  %s\n", $1, $2; printf "%-20s  %s\n", "--------------------", "-----"; next} {printf "%-20s  %s\n", $1, $2}' "$prog"
+  fi
 }
 
 crew_finish() {
@@ -1570,9 +1607,17 @@ crew-report)
     shift
     crew_report "$@"
     ;;
+crew-resume)
+    shift
+    crew_resume "$@"
+    ;;
 crew-cost)
     shift
     crew_cost "$@"
+    ;;
+crew-checkpoint)
+    shift
+    crew_checkpoint "$@"
     ;;
 crew-cost-summary)
     shift
