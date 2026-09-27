@@ -28,7 +28,7 @@ Worker-side (run from inside a crew worktree): `ak reply <message>` messages the
 - spawn crew
 - let it work in its own worktree
 - proactively ask for spend snapshots with `ak crew-cost-prompt` when cost matters
-- have the crew push back with `ak crew-report`
+- have the crew hand back with `ak done` from its worktree (or `ak crew-report <slug>` from the primary root)
 - summarize spend with `ak crew-cost-summary` before handoff when useful
 - peek only when needed
 - send explicit guidance when blocked
@@ -37,9 +37,9 @@ Worker-side (run from inside a crew worktree): `ak reply <message>` messages the
 
 ## Push reporting
 
-`crew-report` writes the durable report, appends an inbox entry, marks the crew as reported, shows a Herdr notification when available, and wakes the registered primary by sending the report message into its Herdr target. This avoids both routine polling and a blocking wait loop while keeping the primary in control of final review and cleanup. `primary-set` refuses explicit targets that are not found in Herdr and refuses known crew slugs/panes.
+`ak done` (from the worker worktree; the canonical handback) and `ak crew-report <slug> <message>` (from the primary root; the equivalent) both write the durable report, append an inbox entry, mark the crew as reported, show a Herdr notification when available, and wake the registered primary by sending the report message into its Herdr target. A failed wake is reported on stderr, exits non-zero, and records `undelivered_at=<ts>` in the crew `state`; the report artifacts are always written first. This avoids both routine polling and a blocking wait loop while keeping the primary in control of final review and cleanup. `primary-set` refuses explicit targets that are not found in Herdr and refuses known crew slugs/panes.
 
-Use `ak primary-set --notify-only` or `AK_NO_WAKE=1 ak crew-report ...` when you want inbox/notification-only reporting.
+Use `ak primary-set --notify-only` or `AK_NO_WAKE=1` when you want inbox/notification-only reporting.
 
 ## Cost tracking
 

@@ -50,9 +50,12 @@ Environment:
                          current Herdr workspace (HERDR_WORKSPACE_ID) when ak
                          runs inside a Herdr-managed pane, else "agent-kit"
   AK_CREW_COMMAND        command run in new crew tab (default: pi)
-  AK_CREW_STARTUP_TIMEOUT max ms to wait for a crew agent to settle after the
-                         startup prompt is submitted (default: 120000); a
-                         timeout only logs a warning, it does not fail spawn
+  AK_CREW_STARTUP_TIMEOUT max ms overall deadline for a crew startup prompt to
+                         be CONFIRMED accepted (default: 120000); spawn exits
+                         non-zero if delivery cannot be confirmed
+  AK_CREW_READY_TIMEOUT  max ms to wait for the crew pane's agent to report an
+                         input-ready state before the startup prompt is sent
+                         (default: 15000)
   AK_NO_NOTIFY           disable backend notifications when set to 1
   AK_NO_WAKE             disable primary wakeup injection when set to 1
   AK_COST_CURRENCY       currency label for crew-cost (default: USD)
@@ -341,6 +344,16 @@ herdr_valid_agent_name() {
     printf '%s' "$1" | grep -Eq '^[a-z][a-z0-9_-]{0,31}$'
 }
 
+# Whether this herdr can attach a named agent to an EXISTING pane (the
+# `--kind/--pane` form herdr_agent_start_retry uses). Herdr 0.7 replaced that
+# with `herdr agent start <name> ... -- <argv>`, which creates and owns its own
+# pane, so crew-spawn's tab layout falls back to `herdr pane run`. Probe the
+# flag instead of whitelisting versions, so the unsupported attempt is skipped
+# (and not warned about) on every spawn.
+herdr_agent_pane_attach_supported() {
+    herdr agent start --help 2>&1 | grep -q -- '--pane'
+}
+
 # Start a known agent kind in an existing pane, retrying briefly while the
 # pane's shell is not yet an available interactive prompt. Echoes nothing;
 # sets herdr_agent_start_error on failure.
@@ -397,6 +410,7 @@ herdr_tab_create() {
     [ -n "$tab" ] && printf 'tab: %s\n' "$tab"
     [ -n "$pane" ] && printf 'pane: %s\n' "$pane"
     HERDR_CREATED_AGENT_NAME=
+    HERDR_CREATED_AGENT_KIND=
     if [ "$#" -gt 0 ]; then
         cmd=$*
         [ -n "$pane" ] || {
@@ -407,6 +421,14 @@ herdr_tab_create() {
         if [ -n "${AK_TAB_AGENT_NAME:-}" ] && herdr_valid_agent_name "$AK_TAB_AGENT_NAME"; then
             first_word=$(printf '%s' "$cmd" | awk '{print $1}')
             kind=$(herdr_agent_kind_of "$first_word" || true)
+        fi
+        # Record the resolved agent kind for startup-prompt delivery even when
+        # this herdr cannot attach it to the existing pane (0.7.x): the pane
+        # still auto-detects that harness, so the kind is still what we expect.
+        HERDR_CREATED_AGENT_KIND=$kind
+        if [ -n "$kind" ] && ! herdr_agent_pane_attach_supported; then
+            printf 'note: this herdr starts agents in their own pane and cannot attach one to an existing pane; running %s via pane run (Herdr auto-detects it)\n' "$kind" >&2
+            kind=
         fi
         if [ -n "$kind" ]; then
             rest=$(printf '%s' "$cmd" | cut -d' ' -f2-)
@@ -628,6 +650,35 @@ crew_progress_path() {
   printf '%s/progress.tsv' "$(crew_dir "$1")"
 }
 
+# The repo root that owns .agent-kit/crew state. From a worker worktree this
+# is the primary repo recorded in the role marker; elsewhere it is the current
+# checkout's root. This makes crew-ledger commands worktree-safe the same way
+# ak done / ak reply / ak chat are.
+crew_root() {
+    if is_worker; then
+        marker=$(role_marker_path 2>/dev/null) || true
+        if [ -n "${marker:-}" ] && [ -f "$marker" ]; then
+            proot=$(role_field "$marker" primary_repo)
+            if [ -n "$proot" ] && [ -d "$proot" ]; then
+                printf '%s\n' "$proot"
+                return 0
+            fi
+        fi
+    fi
+    repo_root
+}
+
+# Record a durable "a wake could not be confirmed" marker in the crew state
+# file so the primary can discover it without watching stderr. On repeated
+# failures the latest timestamp is the last undelivered_at line.
+mark_wake_undelivered() {
+    root=$1
+    slug=$2
+    state="$root/.agent-kit/crew/$slug/state"
+    [ -d "$(dirname "$state")" ] || return 0
+    printf 'undelivered_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$state"
+}
+
 crew_branch_name() {
     printf 'ak/%s' "$1"
 }
@@ -689,6 +740,114 @@ crew_worktree_clean() {
     else
         [ -z "$(git -C "$worktree" status --porcelain 2>/dev/null)" ]
     fi
+}
+
+# Deliver the startup prompt to a freshly spawned crew pane and PROVE it landed
+# AND was accepted. A crew that boots without its brief is useless, so an
+# unconfirmed delivery is a hard failure (non-zero return) that the caller must
+# turn into a failed spawn - never a warning.
+#
+# Crews run through `herdr pane run` (this herdr cannot attach a named agent to
+# an existing pane), so the prompt is submitted as raw pane input - the same
+# path `ak crew-send` uses. Readiness is Herdr's own agent state: "idle"/"done"
+# means the agent is sitting at its prompt. Acceptance is then proven by the
+# agent LEAVING that state, because visible text alone is not enough - while the
+# TUI is still settling, the submit Enter can be swallowed and leave the prompt
+# sitting in the input box with the agent still idle. In that case the Enter is
+# re-pressed until the agent starts working.
+#
+# Failure modes are kept distinct: "no agent registered" and "pane not ready"
+# are reported separately from a send that cannot be confirmed. $4 is the herdr
+# agent kind the crew command resolves to ("" for an arbitrary command, which
+# has no agent state to check); $5 is a substring that must become visible in
+# the pane once the prompt lands. $6 is a single overall wall-clock deadline
+# (ms) bounding BOTH phases so a broken pane can never hang spawn forever.
+crew_deliver_startup_prompt() {
+    session=$1
+    pane=$2
+    prompt=$3
+    expect_kind=$4
+    marker=$5
+    overall_budget=${6:-120000}
+    ready_budget=${AK_CREW_READY_TIMEOUT:-15000}
+    submit_retry=2000
+    # The readiness phase may not outlive the overall deadline.
+    [ "$ready_budget" -gt "$overall_budget" ] && ready_budget=$overall_budget
+
+    elapsed=0
+    status=
+    agent_pane=0
+    while :; do
+        status=$(backend_agent_status "$session" "$pane")
+        case "$status" in
+        idle | done)
+            agent_pane=1
+            break
+            ;;
+        esac
+        if [ "$elapsed" -ge "$ready_budget" ]; then
+            if [ -n "$expect_kind" ]; then
+                if [ "$status" = agent_not_found ] || [ "$status" = unknown ]; then
+                    printf 'error: no %s agent registered in crew pane %s after %sms (last status: %s)\n' \
+                        "$expect_kind" "$pane" "$ready_budget" "$status" >&2
+                else
+                    printf 'error: crew pane %s never became input-ready after %sms (last status: %s)\n' \
+                        "$pane" "$ready_budget" "$status" >&2
+                fi
+                return 1
+            fi
+            printf 'note: no herdr agent detected in crew pane %s after %sms (status: %s); submitting the startup prompt as raw pane input\n' \
+                "$pane" "$ready_budget" "$status" >&2
+            break
+        fi
+        sleep 0.5
+        elapsed=$((elapsed + 500))
+    done
+
+    before=$status
+    if ! backend_pane_send "$session" "$pane" "$prompt"; then
+        printf 'error: could not send the startup prompt to crew pane %s\n' "$pane" >&2
+        return 1
+    fi
+
+    since_submit=0
+    while :; do
+        status=$(backend_agent_status "$session" "$pane")
+        if [ "$agent_pane" = 1 ]; then
+            # Acceptance is the agent actively processing the prompt
+            # (working/blocked), or having completed a turn it would not have
+            # started otherwise (idle -> done). A vanished agent is the
+            # opposite of acceptance, and must not be mistaken for a change.
+            case "$status" in
+            working | blocked) return 0 ;;
+            done)
+                [ "$before" = idle ] && return 0
+                ;;
+            agent_not_found | unknown | '')
+                printf 'error: crew agent vanished from pane %s before accepting its startup prompt (last status: %s)\n' "$pane" "$status" >&2
+                return 1
+                ;;
+            esac
+            # Still idle with the prompt sitting in its input box: the submit
+            # Enter was swallowed while the TUI was settling. Nudge it again.
+            if [ "$since_submit" -ge "$submit_retry" ]; then
+                backend_pane_submit "$session" "$pane" || true
+                since_submit=0
+            fi
+        elif [ -n "$marker" ] && backend_pane_contains "$session" "$pane" "$marker"; then
+            # No agent reports acceptance, so the best available proof is the
+            # prompt text showing up in the pane.
+            return 0
+        fi
+        if [ "$elapsed" -ge "$overall_budget" ]; then
+            printf 'error: startup prompt was sent to crew pane %s but delivery could not be confirmed within %sms (last status: %s)\n' \
+                "$pane" "$overall_budget" "$status" >&2
+            return 1
+        fi
+        sleep 0.5
+        elapsed=$((elapsed + 500))
+        since_submit=$((since_submit + 500))
+    done
 }
 
 crew_spawn() {
@@ -786,6 +945,21 @@ EOF
     printf 'state=running\nstarted_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$crew_dir/state"
     cmd=${AK_CREW_COMMAND:-pi}
     crew_agent_name=$(slugify "crew-$slug" | cut -c1-32)
+    # Write a discoverable meta BEFORE the herdr tab is created, so an aborted
+    # spawn (tab/pane failure) does not leave an orphan worktree that
+    # crew-status / crew-audit / crew-finish cannot see. The herdr_* fields are
+    # filled in below once the tab exists.
+    cat >"$crew_dir/meta" <<EOF
+slug=$slug
+repo=$root
+worktree=$worktree
+branch=$branch
+vcs=$vcs
+jj_change=$jj_change
+brief=$crew_dir/brief.md
+command=$cmd
+created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
     AK_TAB_AGENT_NAME=$crew_agent_name herdr_tab_create "crew-$slug" "$worktree" "$cmd"
     cat >"$crew_dir/meta" <<EOF
 slug=$slug
@@ -803,34 +977,16 @@ command=$cmd
 created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
     if [ -n "${HERDR_CREATED_PANE:-}" ]; then
-        startup_prompt="Read $crew_dir/brief.md and begin. When ready, report from the primary repo root with: cd \"$root\" && $ak_cmd crew-report $slug \"summary, changed files, checks, blockers\""
-        target=${HERDR_CREATED_AGENT_NAME:-}
-        if [ -z "$target" ]; then
-            # herdr_tab_create used the pane-run fallback (arbitrary command); poll
-            # for Herdr's own agent auto-detection before falling back further.
-            i=0
-            while [ "$i" -lt 30 ]; do
-                agent_status=$(herdr agent get "$HERDR_CREATED_PANE" --session "$HERDR_CREATED_SESSION" 2>/dev/null | jq -r '.result.agent.agent_status // empty' 2>/dev/null || true)
-                [ -n "$agent_status" ] && {
-                    target=$HERDR_CREATED_PANE
-                    break
-                }
-                i=$((i + 1))
-                sleep 0.5
-            done
-        fi
-        if [ -n "$target" ]; then
-            timeout=${AK_CREW_STARTUP_TIMEOUT:-120000}
-            if ! herdr agent prompt "$target" "$startup_prompt" --wait --timeout "$timeout" --session "$HERDR_CREATED_SESSION" >/dev/null 2>&1; then
-                printf 'warning: startup prompt submitted to crew pane %s but did not settle within %sms; crew may still be starting\n' "$HERDR_CREATED_PANE" "$timeout" >&2
-            fi
-        else
-            printf 'warning: could not confirm a recognized agent in crew pane %s; falling back to raw pane input for startup prompt\n' "$HERDR_CREATED_PANE" >&2
-            if ! herdr pane send-text "$HERDR_CREATED_PANE" "$startup_prompt" --session "$HERDR_CREATED_SESSION" >/dev/null 2>&1; then
-                printf 'warning: could not send startup prompt to crew pane %s\n' "$HERDR_CREATED_PANE" >&2
-            elif ! herdr pane send-keys "$HERDR_CREATED_PANE" Enter --session "$HERDR_CREATED_SESSION" >/dev/null 2>&1; then
-                printf 'warning: sent startup prompt but could not submit it in crew pane %s\n' "$HERDR_CREATED_PANE" >&2
-            fi
+        startup_prompt="Read $crew_dir/brief.md and begin. When ready, hand back from this worktree with: $ak_cmd done \"summary, files changed, checks, blockers\""
+        timeout=${AK_CREW_STARTUP_TIMEOUT:-120000}
+        # The crew must receive its brief or the spawn must fail: an
+        # unconfirmed delivery exits non-zero instead of printing "crew
+        # spawned" over a silently deaf crew.
+        if ! crew_deliver_startup_prompt "$HERDR_CREATED_SESSION" "$HERDR_CREATED_PANE" "$startup_prompt" "${HERDR_CREATED_AGENT_KIND:-}" "$crew_dir/brief.md" "$timeout"; then
+            printf 'error: crew %s was created in pane %s but its startup prompt was NOT delivered; the crew is running without its brief.\n' "$slug" "$HERDR_CREATED_PANE" >&2
+            printf 'error: crew state is at %s; deliver the brief manually with:\n  %s crew-send %s "Read %s and begin."\n' "$crew_dir" "$ak_cmd" "$slug" "$crew_dir/brief.md" >&2
+            printf 'error: once handled, remove the crew with: %s crew-finish %s\n' "$ak_cmd" "$slug" >&2
+            exit 1
         fi
     fi
     printf 'crew spawned: %s\n' "$slug"
@@ -914,9 +1070,10 @@ crew_checkpoint() {
   [ "$#" -ge 2 ] || { printf 'usage: ak crew-checkpoint <slug> <item text...>\n' >&2; exit 2; }
   slug=$(slugify "$1")
   shift
-  meta=$(crew_meta_path "$slug")
+  root=$(crew_root)
+  meta="$root/.agent-kit/crew/$slug/meta"
   [ -f "$meta" ] || { printf 'unknown crew: %s\n' "$slug" >&2; exit 1; }
-  prog=$(crew_progress_path "$slug")
+  prog="$root/.agent-kit/crew/$slug/progress.tsv"
   mkdir -p "$(dirname "$prog")"
   if [ ! -f "$prog" ]; then
     printf 'timestamp\titem\n' >"$prog"
@@ -935,13 +1092,14 @@ crew_cost() {
     slug=$(slugify "$1")
     amount=$2
     shift 2
-    meta=$(crew_meta_path "$slug")
+    root=$(crew_root)
+    meta="$root/.agent-kit/crew/$slug/meta"
     [ -f "$meta" ] || {
         printf 'unknown crew: %s\n' "$slug" >&2
         exit 1
     }
     currency=${AK_COST_CURRENCY:-USD}
-    cost=$(crew_cost_path "$slug")
+    cost="$root/.agent-kit/crew/$slug/cost.tsv"
     mkdir -p "$(dirname "$cost")"
     if [ ! -f "$cost" ]; then
         printf 'timestamp\tslug\tamount\tcurrency\tprovider\tmodel\tsession\tnote\n' >"$cost"
@@ -1021,7 +1179,7 @@ crew_report() {
     }
     slug=$(slugify "$1")
     shift
-    root=$(repo_root)
+    root=$(crew_root)
     chat_append "$root" "$slug" worker "report: $*"
     crew_report_core "$root" "$slug" "$*"
 }
@@ -1216,19 +1374,40 @@ backend_wake() {
     case "$(backend_kind)" in
     herdr)
         command -v herdr >/dev/null 2>&1 || return 1
-        # Prefer the agent surface, which honors the pane's live
-        # bracketed-paste mode so the submit Enter is not swallowed. Fall back
-        # to raw pane input only for a plain (non-agent) shell pane.
-        if herdr agent prompt "$target" "$message" --session "$session" >/dev/null 2>&1; then
+        # Probe the target's agent liveness first. Where an agent surface is
+        # available, submit via `herdr agent send` (literal text honoring the
+        # pane's bracketed-paste mode) plus an explicit Enter. A plain
+        # non-agent shell pane is the only fallback for raw pane input, and
+        # that fallback is logged so a dead agent is never silently reported
+        # as a successful wake.
+        status=$(backend_agent_status "$session" "$target")
+        case "$status" in
+        idle | working | blocked | done)
+            if ! herdr agent send "$target" "$message" --session "$session" >/dev/null 2>&1; then
+                printf 'error: wake send failed for agent target %s\n' "$target" >&2
+                return 1
+            fi
+            if ! herdr pane send-keys "$target" enter --session "$session" >/dev/null 2>&1; then
+                printf 'error: wake submitted to agent %s but the submit key was not confirmed\n' "$target" >&2
+                return 2
+            fi
             return 0
-        fi
-        if herdr pane send-text "$target" "$message" --session "$session" >/dev/null 2>&1; then
-            herdr pane send-keys "$target" enter --session "$session" >/dev/null 2>&1 || true
+            ;;
+        *)
+            printf 'note: no agent registered at target %s (status: %s); using raw pane input fallback\n' "$target" "$status" >&2
+            if ! herdr pane send-text "$target" "$message" --session "$session" >/dev/null 2>&1; then
+                printf 'error: raw pane wake send failed for target %s (no agent registered)\n' "$target" >&2
+                return 1
+            fi
+            if ! herdr pane send-keys "$target" enter --session "$session" >/dev/null 2>&1; then
+                printf 'error: raw pane wake submitted to %s but the submit key was not confirmed\n' "$target" >&2
+                return 2
+            fi
             return 0
-        fi
-        return 1
+            ;;
+        esac
         ;;
-    *) return 1 ;;
+    *) backend_require ;;
     esac
 }
 
@@ -1249,10 +1428,30 @@ backend_pane_send() {
     case "$(backend_kind)" in
     herdr)
         herdr pane send-text "$pane" "$message" --session "$session" || return 1
-        herdr pane send-keys "$pane" enter --session "$session" || return 1
+        backend_pane_submit "$session" "$pane" || return 1
         ;;
     *) backend_require ;;
     esac
+}
+
+# Press Enter in a pane, submitting whatever is sitting on its input line.
+backend_pane_submit() {
+    session=$1
+    pane=$2
+    case "$(backend_kind)" in
+    herdr) herdr pane send-keys "$pane" enter --session "$session" ;;
+    *) backend_require ;;
+    esac
+}
+
+# Whether a substring is visible in a pane's recent buffer. Newlines are
+# stripped first so text wrapped by the pane's renderer still matches.
+backend_pane_contains() {
+    session=$1
+    pane=$2
+    needle=$3
+    buffer=$(backend_pane_read "$session" "$pane" 200 2>/dev/null | tr -d '\r\n' || true)
+    [ -n "$buffer" ] && printf '%s' "$buffer" | grep -qF -- "$needle"
 }
 
 backend_agent_status() {
@@ -1264,7 +1463,11 @@ backend_agent_status() {
             printf 'unknown'
             return 0
         }
-        herdr agent get "$pane" --session "$session" 2>/dev/null | jq -r '.result.agent.agent_status // .error.code // "unknown"' 2>/dev/null || printf 'unknown'
+        status=$(herdr agent get "$pane" --session "$session" 2>&1 | jq -r '.result.agent.agent_status // .error.code // empty' 2>/dev/null || true)
+        # A missing pane (empty/errored reply) is reported as unknown rather
+        # than an empty string, so callers can always match on a status.
+        [ -n "$status" ] || status=unknown
+        printf '%s\n' "$status"
         ;;
     *) printf 'unknown' ;;
     esac
@@ -1461,9 +1664,17 @@ ak_reply() {
     ptarget=$(role_field "$marker" primary_target)
     msg=$*
     chat_append "$proot" "$slug" worker "$msg"
-    if [ -n "$ptarget" ]; then
-        backend_wake "$psession" "$ptarget" "crew $slug: $msg" >/dev/null 2>&1 || true
-        printf 'replied to primary and sent wake: %s\n' "$slug"
+    if [ "${AK_NO_WAKE:-0}" = 1 ]; then
+        printf 'replied (logged to chat); wake disabled via AK_NO_WAKE\n'
+    elif [ -n "$ptarget" ]; then
+        if backend_wake "$psession" "$ptarget" "crew $slug: $msg"; then
+            printf 'replied to primary and sent wake: %s\n' "$slug"
+        else
+            rc=$?
+            mark_wake_undelivered "$proot" "$slug"
+            printf 'error: reply was logged for %s but the primary wake was NOT delivered (exit %s); see above\n' "$slug" "$rc" >&2
+            exit "$rc"
+        fi
     else
         printf 'replied (logged to chat); no primary target recorded to wake\n'
     fi
@@ -1530,11 +1741,19 @@ crew_report_core() {
     inject=$(primary_field_at "$root" inject 2>/dev/null || printf 1)
     target=$(primary_field_at "$root" target 2>/dev/null || true)
     backend_notify "$session" "agent-kit crew update" "crew $slug: $message"
+    wake_rc=0
     if [ "${AK_NO_WAKE:-0}" != 1 ] && [ "${inject:-1}" = 1 ] && [ -n "$target" ]; then
-        backend_wake "$session" "$target" "crew $slug: $message" >/dev/null 2>&1 || true
+        if backend_wake "$session" "$target" "crew $slug: $message"; then
+            :
+        else
+            wake_rc=$?
+            mark_wake_undelivered "$root" "$slug"
+            printf 'error: report for crew %s was written but the primary wake was NOT delivered (exit %s); see above\n' "$slug" "$wake_rc" >&2
+        fi
     fi
     printf 'crew reported: %s\n' "$slug"
     printf 'report: %s\n' "$report"
+    [ "$wake_rc" = 0 ] || exit "$wake_rc"
 }
 
 cmd=${1:-}
