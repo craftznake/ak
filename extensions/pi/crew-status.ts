@@ -25,6 +25,16 @@
 // killed by the timeout and the panel keeps the last good model. Status is
 // refreshed every AK_CREW_STATUS_INTERVAL_MS (default 3000ms).
 //
+//
+// Scope: primary sessions only, and only the current session's crews. A
+// worker checkout (.agent-kit/role with role=worker) renders nothing at all
+// and never starts the polling loop. In a primary session a crew is included
+// iff its meta session_id equals the current session token from
+// .agent-kit/primary; a legacy crew with no session_id in meta is included
+// only while actually live. Crews from other pi sessions are no longer live,
+// so they cannot appear — this is structural, not a threshold (no
+// elapsed-time/mtime/state filtering).
+//
 // Disable: AK_CREW_STATUS=0 (also "false"/"off"/"no") disables at load; the
 // /crew-status on|off command toggles at runtime.
 
@@ -40,7 +50,8 @@ interface CrewRow {
     role: string;
     worktree?: string;
     branch?: string;
-    session?: string;
+    session?: string; // herdr session name (meta herdr_session)
+    sessionId?: string; // pi session token (meta session_id)
     pane?: string;
     command?: string;
     createdAtMs?: number;
@@ -93,6 +104,49 @@ function readKeyValueFile(file: string): Record<string, string> {
     } catch {
         return {};
     }
+}
+
+// ---------------------------------------------------------------------------
+// Session scoping (current session only) + worker suppression
+// ---------------------------------------------------------------------------
+
+/** Current session token from `.agent-kit/primary` (key `session_id=`).
+ *
+ * Read fresh on every collection tick — the primary may re-register
+ * mid-session and the token changes, so it is never cached for the process
+ * lifetime. */
+function readPrimarySessionId(root: string): string | undefined {
+    return readKeyValueFile(path.join(root, ".agent-kit", "primary")).session_id || undefined;
+}
+
+/** A worker checkout is one whose `.agent-kit/role` carries `role=worker`
+ * (see docs/roles-model.md). The panel is the primary's supervision view, so
+ * worker sessions render nothing at all and never start the polling loop. */
+function isWorkerCheckout(root: string | undefined): boolean {
+    if (!root) return false;
+    return readKeyValueFile(path.join(root, ".agent-kit", "role")).role === "worker";
+}
+
+// Include a crew iff its meta `session_id` equals the current session token
+// from `.agent-kit/primary`: crews from other pi sessions are no longer live,
+// so they cannot appear — this is structural, not a threshold. (No
+// elapsed-time/mtime filtering; the `state` file is not authoritative for
+// liveness.) A legacy crew with no `session_id` in meta is included only if it
+// is live right now: its herdr agent status is neither gone, agent_not_found,
+// missing, nor unknown.
+const NON_LIVE_STATUSES: ReadonlySet<string> = new Set(["gone", "agent_not_found", "missing", "unknown"]);
+
+function isLiveStatus(status: string): boolean {
+    return !NON_LIVE_STATUSES.has(status);
+}
+
+function isCrewVisible(crew: CrewRow, currentSessionId: string | undefined): boolean {
+    if (crew.sessionId) {
+        return currentSessionId !== undefined && crew.sessionId === currentSessionId;
+    }
+    // Legacy untagged crew (spawned before session_id was written to meta):
+    // visible only while actually live right now.
+    return isLiveStatus(crew.liveStatus);
 }
 
 export function findRoot(start: string): string | undefined {
@@ -240,6 +294,7 @@ export function readCrew(dir: string): CrewRow {
         worktree: meta.worktree || undefined,
         branch: meta.branch || undefined,
         session: meta.herdr_session || undefined,
+        sessionId: meta.session_id || undefined,
         pane: meta.herdr_pane || undefined,
         command: meta.command || undefined,
         createdAtMs,
@@ -522,8 +577,15 @@ export default function crewStatus(pi: ExtensionAPI) {
             root = resolveCrewRoot(found);
             const dirs = root ? listCrewDirs(root) : [];
             syncModel(dirs);
-            requestRender?.();
+            // Live statuses first: the session-scope filter below judges
+            // untagged legacy crews by their live herdr status, so it must run
+            // after the refresh. Render once, only after scoping, so stale
+            // rows never flash.
             await refreshLiveStatuses();
+            const currentSessionId = root ? readPrimarySessionId(root) : undefined;
+            for (const [slug, crew] of [...model]) {
+                if (!isCrewVisible(crew, currentSessionId)) model.delete(slug);
+            }
             requestRender?.();
         } catch {
             // Keep the last good model; never let a poll error blank the panel.
@@ -542,7 +604,11 @@ export default function crewStatus(pi: ExtensionAPI) {
     function setup(ctx: ExtensionContext) {
         latestCtx = ctx;
         if (!enabled || ctx.mode !== "tui" || widgetInstalled) return;
-        root = resolveCrewRoot(findRoot(ctx.cwd));
+        // Primary sessions only: a worker checkout (.agent-kit/role with
+        // role=worker) renders nothing at all and never starts polling.
+        const found = findRoot(ctx.cwd);
+        if (isWorkerCheckout(found)) return;
+        root = resolveCrewRoot(found);
         ctx.ui.setWidget(WIDGET_KEY, (tui, theme) => {
             currentTheme = theme;
             requestRender = () => tui.requestRender();
@@ -574,7 +640,11 @@ export default function crewStatus(pi: ExtensionAPI) {
             if (arg === "on") {
                 enabled = true;
                 setup(ctx);
-                ctx.ui.notify("crew status panel enabled", "info");
+                if (isWorkerCheckout(findRoot(ctx.cwd))) {
+                    ctx.ui.notify("crew status panel stays hidden in worker sessions", "info");
+                } else {
+                    ctx.ui.notify("crew status panel enabled", "info");
+                }
                 return;
             }
             if (arg === "off") {
