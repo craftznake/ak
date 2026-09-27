@@ -31,6 +31,7 @@ Usage:
   ak ack [<slug>] [<seq|path>]
   ak chat [<slug>] [lines]
   ak crew-finish [--abandon] <slug> [report text...]
+  ak crew-fail <slug> [reason text...]
   ak docs [list|show <name>]
 
 Worker commands (run from inside a crew worktree):
@@ -66,6 +67,8 @@ Environment:
                          ack-required inbox record (default: 90)
   AK_INBOX_RING_MAX     max doorbell ring attempts before escalation
                          (default: 3)
+  AK_LOCK_STALE_SECS    max age in seconds before a lock directory without
+                         a pid record is reclaimed as stale (default: 300)
   AK_DEBUG_WAKE         when set to a file path, append each framed primary
                          wake line there (test/diagnostic hook)
   AK_NO_NOTIFY           disable backend notifications when set to 1
@@ -234,10 +237,16 @@ lock_acquire() {
         if [ -f "$pidfile" ]; then
             holder=$(cat "$pidfile" 2>/dev/null || true)
             if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
-                # Holder is gone (killed, never released): reclaim the stale lock.
-                rm -rf "$lockdir" 2>/dev/null || true
-                rm -f "$pidfile" 2>/dev/null || true
-                continue
+                # Holder is gone (killed, never released). Claim the stale
+                # lock by renaming its pid record first: only one reclaimer
+                # can win the rename, so two racing reclaimers can never both
+                # tear the lock down and both end up holding it.
+                if mv "$pidfile" "$pidfile.claim.$$" 2>/dev/null; then
+                    rm -rf "$lockdir" 2>/dev/null || true
+                    rm -f "$pidfile.claim.$$" 2>/dev/null || true
+                    continue
+                fi
+                # Lost the reclaim race; fall through, sleep and retry.
             fi
         else
             # Legacy lock without a pid record: reclaim by age as a last resort.
@@ -335,7 +344,11 @@ herdr_workspace_id() {
     label=$2
     herdr_server_ensure "$session"
     if out=$(herdr workspace list --session "$session" 2>/dev/null); then
-        id=$(printf '%s' "$out" | jq -r --arg label "$label" '(.result.workspaces // .workspaces // [])[] | select(.label == $label) | (.workspace_id // .id) ' 2>/dev/null | head -n 1)
+        # Match the label with or without herdr's "[N] " index prefix: some
+        # herdr generations/flows persist decorated labels (e.g. "[2] agent-kit"
+        # for a workspace created as "agent-kit"), and an exact-only match
+        # would miss them and leak a new workspace on every lookup.
+        id=$(printf '%s' "$out" | jq -r --arg label "$label" '(.result.workspaces // .workspaces // [])[] | select(.label == $label or ((.label // "") | sub("^\\[[0-9]+\\] "; "") == $label)) | (.workspace_id // .id) ' 2>/dev/null | head -n 1)
         [ -n "$id" ] && {
             printf '%s' "$id"
             return 0
@@ -400,6 +413,22 @@ herdr_valid_agent_name() {
 # (and not warned about) on every spawn.
 herdr_agent_pane_attach_supported() {
     herdr agent start --help 2>&1 | grep -q -- '--pane'
+}
+
+# Whether this herdr exposes the 0.9 `agent prompt` surface: submitting a
+# full agent turn (text + Enter) in one call. Older herdr only had
+# `agent send` (literal text; the caller supplied the Enter key separately).
+# Probe the flag instead of pinning a version, so the unsupported attempt is
+# skipped on every wake - the same pattern herdr_agent_pane_attach_supported
+# uses for spawn.
+herdr_agent_prompt_supported() {
+    herdr agent --help 2>&1 | grep -qE '^  prompt '
+}
+
+# Whether `agent wait` matches states with the 0.9 `--until` flag (renamed
+# from the older `--status`). Probed per call so both herdr generations work.
+herdr_agent_wait_until_supported() {
+    herdr agent wait --help 2>&1 | grep -q -- '--until'
 }
 
 # Start a known agent kind in an existing pane, retrying briefly while the
@@ -773,6 +802,7 @@ crew_state_write() {
     running) ts_key=started_at ;;
     reported) ts_key=reported_at ;;
     done) ts_key=finished_at ;;
+    failed) ts_key=failed_at ;;
     esac
     tmp="$f.tmp-$$"
     {
@@ -780,8 +810,8 @@ crew_state_write() {
         printf 'state=%s\n' "$state"
         if [ -f "$f" ]; then
             awk -F= -v k="$ts_key" '
-                $1!="schema" && $1!="state" && $1!="started_at" && $1!="reported_at" && $1!="finished_at" {print}
-                ($1=="started_at" || $1=="reported_at" || $1=="finished_at") && ($1 != k) {print}
+                $1!="schema" && $1!="state" && $1!="started_at" && $1!="reported_at" && $1!="finished_at" && $1!="failed_at" {print}
+                ($1=="started_at" || $1=="reported_at" || $1=="finished_at" || $1=="failed_at") && ($1 != k) {print}
             ' "$f"
         fi
         if [ -n "$ts_key" ]; then printf '%s=%s\n' "$ts_key" "$now"; fi
@@ -966,14 +996,24 @@ inbox_ring_initial() {
     root=$1 slug=$2 seq=$3
     inbox=$(inbox_dir "$root" "$slug")
     line=$(inbox_doorbell_line "$inbox")
-    if inbox_ring "$root" "$slug" "$line"; then
-        inbox_ring_state_set "$root" "$slug" "$seq" 1 "$(date +%s)"
-        return 0
-    else
-        rc=$?
-        [ "$rc" = 3 ] && inbox_escalate "$root" "$slug" "$seq"
+    rc=0
+    inbox_ring "$root" "$slug" "$line" || rc=$?
+    if [ "$rc" = 3 ]; then
+        # Positively dead/missing target: escalate directly, without typing.
+        inbox_escalate "$root" "$slug" "$seq"
         return 1
     fi
+    # Record the first attempt even when the keystroke failed (uncertain
+    # target): without a ring-state entry the record would never enter the
+    # ladder (inbox_sweep skips epoch=0 entries) and would sit unacked
+    # forever - neither re-rung nor escalated, silently dropped. Tracking it
+    # keeps the guarantee: later sweeps re-attempt up to the max, then
+    # escalate.
+    inbox_ring_state_set "$root" "$slug" "$seq" 1 "$(date +%s)"
+    if [ "$rc" = 0 ]; then
+        return 0
+    fi
+    return 1
 }
 
 # The bounded re-ring ladder: one ring attempt per grace period per unacked
@@ -1001,12 +1041,18 @@ inbox_sweep() {
             continue
         fi
         if [ "$epoch" -gt 0 ] && [ $((now - epoch)) -ge "$grace" ]; then
-            if inbox_ring "$root" "$slug" "$line"; then
-                inbox_ring_state_set "$root" "$slug" "$seq" $((count + 1)) "$now"
-            else
-                rc=$?
-                [ "$rc" = 3 ] && inbox_escalate "$root" "$slug" "$seq"
+            rc=0
+            inbox_ring "$root" "$slug" "$line" || rc=$?
+            if [ "$rc" = 3 ]; then
+                inbox_escalate "$root" "$slug" "$seq"
+                continue
             fi
+            # Count the attempt even when the keystroke failed (uncertain
+            # target): attempts must stay bounded, so a never-ackable,
+            # never-ringable record still escalates after the max instead of
+            # sitting untracked/unrung forever. Positively dead targets
+            # (agent_not_found) escalated directly above.
+            inbox_ring_state_set "$root" "$slug" "$seq" $((count + 1)) "$now"
         fi
     done
     lock_release
@@ -1451,7 +1497,7 @@ EOF
             crew_state_transition "$root" "$slug" failed || true
             printf 'error: crew %s was created in pane %s but its startup prompt was NOT delivered; the crew is running without its brief.\n' "$slug" "$HERDR_CREATED_PANE" >&2
             printf 'error: crew state is at %s; deliver the brief manually with:\n  %s crew-send %s "Read %s and begin."\n' "$crew_dir" "$ak_cmd" "$slug" "$crew_dir/brief.md" >&2
-            printf 'error: once handled, remove the crew with: %s crew-finish %s\n' "$ak_cmd" "$slug" >&2
+            printf 'error: once handled, retire the crew with: %s crew-finish --abandon %s\n' "$ak_cmd" "$slug" >&2
             exit 1
         fi
         crew_state_transition "$root" "$slug" running || {
@@ -1723,6 +1769,48 @@ crew_resume() {
   fi
 }
 
+# Supervisor path to retire a crew that will never report on its own (a
+# stuck, crashed, or wedged worker). Transitions spawning/running -> failed
+# under the per-crew lock and records the reason durably in the state file
+# (failed_at + one-line failed_reason). A failed crew is then retired with
+# `ak crew-finish --abandon` (no report required); it can never silently
+# flip back to running - only the state machine decides transitions.
+crew_fail() {
+    [ "$#" -ge 1 ] || {
+        printf 'usage: ak crew-fail <slug> [reason text...]\n' >&2
+        exit 2
+    }
+    slug=$(slugify "$1")
+    shift
+    reason=$*
+    [ -n "$reason" ] || reason='retired by supervisor (no reason given)'
+    root=$(repo_root)
+    meta=$(crew_meta_path "$slug")
+    [ -f "$meta" ] || { printf 'unknown crew: %s\n' "$slug" >&2; exit 1; }
+    lock_acquire "$root/.agent-kit/locks/crew-$slug.lock"
+    cur=$(crew_state_get "$root" "$slug")
+    if [ "$cur" = failed ]; then
+        printf 'crew %s is already failed; retire it with: %s crew-finish --abandon %s\n' "$slug" "$(self_path)" "$slug" >&2
+        lock_release
+        exit 1
+    fi
+    if ! crew_state_valid_transition "$cur" failed; then
+        printf 'illegal crew state transition: %s -> failed (crew %s)\n' "$cur" "$slug" >&2
+        lock_release
+        exit 1
+    fi
+    crew_state_write "$root" "$slug" failed
+    # Record the reason durably as one flattened key=value line (last-wins).
+    f=$(crew_state_path "$root" "$slug")
+    tmp="$f.tmp-$$"
+    awk -F= -v r="failed_reason=$(printf '%s' "$reason" | tr '\t\n\r' '  ')" \
+        '$1!="failed_reason" {print} END{print r}' "$f" >"$tmp"
+    mv "$tmp" "$f"
+    lock_release
+    printf 'crew failed: %s (%s)\n' "$slug" "$reason"
+    printf 'retire it with: %s crew-finish --abandon %s\n' "$(self_path)" "$slug"
+}
+
 crew_finish() {
     abandon=0
     if [ "${1:-}" = "--abandon" ]; then
@@ -1765,6 +1853,14 @@ crew_finish() {
         exit 1
         ;;
     esac
+    # Abandoning a FAILED crew: it never got to report (failed spawn, or a
+    # supervisor-failed stuck worker), so no report is required; its tab and
+    # VCS workspace may already be gone, and its worktree may be missing
+    # entirely (e.g. dead after a machine move) - retirement must not wedge
+    # on any of those. Guards that protect salvageable work stay in force:
+    # a dirty worktree and a non-empty jj workspace change still refuse.
+    abandon_failed=0
+    [ "$state" = failed ] && [ "$abandon" = 1 ] && abandon_failed=1
     if [ "$#" -gt 0 ]; then
         mkdir -p "$(dirname "$report")"
         cat >"$report" <<EOF
@@ -1772,7 +1868,7 @@ crew_finish() {
 
 $*
 EOF
-    elif [ ! -f "$report" ]; then
+    elif [ ! -f "$report" ] && [ "$abandon_failed" != 1 ]; then
         printf 'report missing for crew: %s\n' "$slug" >&2
         printf 'write one with: %s crew-report %s "summary..."\n' "$ak_cmd" "$slug" >&2
         exit 1
@@ -1784,7 +1880,12 @@ EOF
     fi
     if [ "$rc" != 0 ]; then
         if [ "$rc" = 2 ]; then
-            printf 'crew worktree is missing (not dirty): %s\n' "$worktree" >&2
+            if [ "$abandon_failed" = 1 ]; then
+                printf 'crew worktree is missing; abandoning anyway: %s\n' "$worktree" >&2
+            else
+                printf 'crew worktree is missing (not dirty): %s\n' "$worktree" >&2
+                exit 1
+            fi
         else
             printf 'crew worktree is dirty; review before finishing: %s\n' "$worktree" >&2
             if [ "$vcs" = jj ]; then
@@ -1792,8 +1893,8 @@ EOF
             else
                 git -C "$worktree" status --short >&2 || true
             fi
+            exit 1
         fi
-        exit 1
     fi
     jj_change=
     if [ "$vcs" = jj ]; then
@@ -1813,14 +1914,22 @@ EOF
     fi
     if command -v herdr >/dev/null 2>&1 && [ -n "$tab" ] && [ -n "$session" ]; then
         backend_tab_close "$session" "$tab" || {
-            printf 'could not close crew tab for %s\n' "$slug" >&2
-            exit 1
+            if [ "$abandon_failed" = 1 ]; then
+                printf 'warning: could not close crew tab for %s; abandoning anyway\n' "$slug" >&2
+            else
+                printf 'could not close crew tab for %s\n' "$slug" >&2
+                exit 1
+            fi
         }
     fi
     if [ "$vcs" = jj ]; then
         jj -R "$root" workspace forget "$slug" >/dev/null 2>&1 || {
-            printf 'could not forget jj workspace %s\n' "$slug" >&2
-            exit 1
+            if [ "$abandon_failed" = 1 ]; then
+                printf 'warning: could not forget jj workspace %s; abandoning anyway\n' "$slug" >&2
+            else
+                printf 'could not forget jj workspace %s\n' "$slug" >&2
+                exit 1
+            fi
         }
         jj_abandon_empty_change "$root" "$jj_change" "agent-kit crew: $slug"
         rm -rf "$worktree" || {
@@ -1834,8 +1943,12 @@ EOF
             git_commits=$(git -C "$root" rev-list "$branch" --not $others 2>/dev/null || true)
         fi
         git -C "$root" worktree remove "$worktree" >/dev/null 2>&1 || {
-            printf 'could not remove worktree %s\n' "$worktree" >&2
-            exit 1
+            if [ "$abandon_failed" = 1 ]; then
+                printf 'warning: could not remove worktree %s; abandoning anyway\n' "$worktree" >&2
+            else
+                printf 'could not remove worktree %s\n' "$worktree" >&2
+                exit 1
+            fi
         }
         git -C "$root" branch -D "$branch" >/dev/null 2>&1 || true
         if [ -n "$git_commits" ]; then
@@ -1857,7 +1970,11 @@ EOF
     crew_state_write "$root" "$slug" done
     lock_release
     printf 'crew finished: %s\n' "$slug"
-    printf 'report: %s\n' "$report"
+    if [ -f "$report" ]; then
+        printf 'report: %s\n' "$report"
+    else
+        printf 'report: none (abandoned failed crew without a report)\n'
+    fi
 }
 
 crew_meta_field() {
@@ -2088,7 +2205,8 @@ backend_wake() {
     herdr)
         command -v herdr >/dev/null 2>&1 || return 1
         # Probe the target's agent liveness first. Where an agent surface is
-        # available, submit via `herdr agent send` (literal text honoring the
+        # available, submit a full agent turn: `herdr agent prompt` on herdr
+        # >= 0.9, or legacy `herdr agent send` (literal text honoring the
         # pane's bracketed-paste mode) plus an explicit Enter. A plain
         # non-agent shell pane is the only fallback for raw pane input, and
         # that fallback is logged so a dead agent is never silently reported
@@ -2096,21 +2214,30 @@ backend_wake() {
         status=$(backend_agent_status "$session" "$target")
         case "$status" in
         idle | working | blocked | done)
-            if ! herdr agent send "$target" "$message" --session "$session" >/dev/null 2>&1; then
-                printf 'error: wake send failed for agent target %s\n' "$target" >&2
-                return 1
+            if herdr_agent_prompt_supported; then
+                if ! herdr agent prompt "$target" "$message" --session "$session" >/dev/null 2>&1; then
+                    printf 'error: wake send failed for agent target %s\n' "$target" >&2
+                    return 1
+                fi
+            else
+                if ! herdr agent send "$target" "$message" --session "$session" >/dev/null 2>&1; then
+                    printf 'error: wake send failed for agent target %s\n' "$target" >&2
+                    return 1
+                fi
+                if ! herdr pane send-keys "$target" enter --session "$session" >/dev/null 2>&1; then
+                    printf 'error: wake submitted to agent %s but the submit key was not confirmed\n' "$target" >&2
+                    return 2
+                fi
             fi
-            if ! herdr pane send-keys "$target" enter --session "$session" >/dev/null 2>&1; then
-                printf 'error: wake submitted to agent %s but the submit key was not confirmed\n' "$target" >&2
-                return 2
-            fi
-            # Delivering the Enter keystroke only proves the key reached the
-            # pane, not that the agent accepted the prompt. Wait for the agent
-            # to enter the working state so a swallowed Enter or a wedged agent
-            # is reported as unconfirmed instead of a false success. An agent
-            # already mid-turn is already working, so the wait returns at once
-            # and the steer is queued for the agent's next turn.
-            if ! herdr agent wait "$target" --status working --timeout "${AK_WAKE_ACCEPT_TIMEOUT:-8000}" --session "$session" >/dev/null 2>&1; then
+            # Delivering the turn only proves the text reached the pane, not
+            # that the agent accepted the prompt. Wait for the agent to enter
+            # the working state so a swallowed submit or a wedged agent is
+            # reported as unconfirmed instead of a false success. An agent
+            # already mid-turn is already working, so the wait returns at
+            # once and the steer is queued for the agent's next turn.
+            wait_state_flag=--status
+            herdr_agent_wait_until_supported && wait_state_flag=--until
+            if ! herdr agent wait "$target" "$wait_state_flag" working --timeout "${AK_WAKE_ACCEPT_TIMEOUT:-8000}" --session "$session" >/dev/null 2>&1; then
                 printf 'error: wake was submitted to agent %s but it did not enter working state within %sms (not confirmed accepted)\n' "$target" "${AK_WAKE_ACCEPT_TIMEOUT:-8000}" >&2
                 return 2
             fi
@@ -2624,6 +2751,10 @@ ack)
 crew-finish)
     shift
     crew_finish "$@"
+    ;;
+crew-fail)
+    shift
+    crew_fail "$@"
     ;;
 docs)
     shift

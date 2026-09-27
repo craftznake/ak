@@ -8,6 +8,11 @@
 #      "exactly one recovery" guarantee under concurrent sweeps.
 #   C. hostile message content end to end: byte-identical round-trip plus a
 #      single inert framed wake (CR/newlines flattened).
+#   D. supervisor retirement: `ak crew-fail` (spawning/running -> failed with a
+#      recorded reason), the failed-state abandon deadlock resolved (a failed
+#      crew is finishable WITHOUT a report, even with a missing worktree), and
+#      the genuine-report guards (dirty worktree, reportless reported/running
+#      crews) still refusing.
 #
 # Runs against a scratch git repo with AK_INBOX_RING_OK=1 (simulated doorbell)
 # and AK_DEBUG_WAKE; nothing touches real crews or herdr.
@@ -118,6 +123,24 @@ rec=$(grep -l 'Recovery request' "$tmp/.agent-kit/crew/racecorr/inbox"/*.msg 2>/
 [ "$rec" = 1 ] || fail "concurrent sweeps sent $rec recovery requests (expected 1)"
 ok "B3 OK (exactly one recovery under 8 concurrent sweeps)"
 
+echo "== B4. a failed FIRST ring still enters the ladder (never silently dropped) =="
+mkcrew nopane
+unset AK_INBOX_RING_OK
+# No herdr pane in meta: the doorbell keystroke fails (rc=1, uncertain target).
+run crew-send nopane "first ring will fail" >/dev/null
+nrs="$tmp/.agent-kit/crew/nopane/inbox/.ring-state"
+[ -f "$nrs" ] || fail "B4: failed first ring left no ring-state entry (record untracked)"
+nring() { awk -F'\t' -v s="$1" '$1==s{print $2; exit}' "$nrs"; }
+[ "$(nring 001)" = 1 ] || fail "B4: ring count != 1 after failed first ring"
+# Later steers must keep counting failed attempts and escalate after max.
+run crew-send nopane "second steer" >/dev/null
+[ "$(nring 001)" = 2 ] || fail "B4: failed re-ring did not consume a rung (count $(nring 001))"
+run crew-send nopane "third steer" >/dev/null
+run crew-send nopane "fourth steer" >/dev/null
+[ -e "$tmp/.agent-kit/crew/nopane/inbox/.escalated/001" ] || fail "B4: never-ringable record never escalated"
+ok "B4 OK (failed rings tracked; escalated after max)"
+export AK_INBOX_RING_OK=1
+
 echo "== C1. hostile body round-trips byte-identically =="
 mkcrew hostile
 BODY=$(printf 'line one
@@ -153,5 +176,77 @@ if run crew-send ro "second, must fail" >/dev/null 2>&1; then
 fi
 chmod 700 "$tmp/.agent-kit/crew/ro/inbox"
 ok "C3 OK (write failure is non-zero)"
+
+echo "== D1. crew-fail: running -> failed with reason recorded verbatim =="
+mkcrew fail1
+run crew-fail fail1 "stuck 60min, zero file changes" >/dev/null
+st1="$tmp/.agent-kit/crew/fail1/state"
+grep -q '^state=failed$' "$st1" || fail "D1: state not failed"
+grep -q '^failed_at=' "$st1" || fail "D1: failed_at not stamped"
+grep -qF 'failed_reason=stuck 60min, zero file changes' "$st1" || fail "D1: failed_reason not recorded verbatim"
+ok "D1 OK (running -> failed, reason recorded)"
+
+echo "== D2. crew-fail: spawning allowed, done/failed refused loudly =="
+mkcrew fail2
+printf 'schema=ak-crew-state.v1\nstate=spawning\n' >"$tmp/.agent-kit/crew/fail2/state"
+run crew-fail fail2 "spawn never accepted" >/dev/null || fail "D2: spawning -> failed refused"
+mkcrew fail3
+printf 'schema=ak-crew-state.v1\nstate=done\n' >"$tmp/.agent-kit/crew/fail3/state"
+run crew-fail fail3 "nope" >/dev/null 2>&1 && fail "D2: crew-fail accepted a done crew"
+grep -q '^state=done$' "$tmp/.agent-kit/crew/fail3/state" || fail "D2: done state was mutated"
+run crew-fail fail2 "already failed" >/dev/null 2>&1 && fail "D2: crew-fail accepted an already-failed crew"
+grep -q '^state=failed$' "$tmp/.agent-kit/crew/fail2/state" || fail "D2: failed state was mutated"
+ok "D2 OK (spawning ok; done/failed refused, state intact)"
+
+echo "== D3. failed crew: finish without --abandon still refuses =="
+run crew-finish fail1 >/dev/null 2>&1 && fail "D3: crew-finish (no --abandon) accepted a failed crew"
+grep -q '^state=failed$' "$tmp/.agent-kit/crew/fail1/state" || fail "D3: failed state was mutated by refused finish"
+ok "D3 OK (finish without --abandon refused)"
+
+echo "== D4. failed crew is cleanly abandonable WITHOUT a report =="
+# Real registered git worktree so teardown is exercised end to end.
+wt="$tmp/wt-fail4"
+git -C "$tmp" worktree add -q -b ak/fail4 "$wt" HEAD >/dev/null 2>&1 || git -C "$tmp" worktree add -b ak/fail4 "$wt" HEAD >/dev/null
+mkdir -p "$tmp/.agent-kit/crew/fail4"
+printf 'slug=fail4\nrepo=%s\nworktree=%s\nbranch=ak/fail4\nvcs=git\nbrief=%s\n' \
+    "$tmp" "$wt" "$tmp/.agent-kit/crew/fail4/brief.md" >"$tmp/.agent-kit/crew/fail4/meta"
+printf 'schema=ak-crew-state.v1\nstate=running\n' >"$tmp/.agent-kit/crew/fail4/state"
+run crew-fail fail4 "configured provider had no API key" >/dev/null
+[ -f "$tmp/.agent-kit/crew/fail4/report.md" ] && fail "D4: unexpected report on a failed crew"
+out=$(run crew-finish --abandon fail4 2>&1) || fail "D4: reportless failed crew could not be abandoned"
+printf '%s\n' "$out" | grep -q 'report: none (abandoned failed crew without a report)' || fail "D4: misleading report line on reportless abandon"
+grep -q '^state=done$' "$tmp/.agent-kit/crew/fail4/state" || fail "D4: state not done after abandon"
+grep -qF 'failed_reason=configured provider had no API key' "$tmp/.agent-kit/crew/fail4/state" || fail "D4: failed_reason not preserved through done"
+[ ! -e "$wt" ] || fail "D4: worktree not removed"
+git -C "$tmp" show-ref --verify --quiet refs/heads/ak/fail4 && fail "D4: branch not deleted"
+ok "D4 OK (failed crew abandoned without report; worktree+branch torn down)"
+
+echo "== D5. failed crew with a MISSING worktree abandons (machine-move case) =="
+mkdir -p "$tmp/.agent-kit/crew/fail5"
+printf 'slug=fail5\nrepo=%s\nworktree=%s/nowhere-fail5\nbranch=ak/fail5\nvcs=git\nbrief=%s\n' \
+    "$tmp" "$tmp" "$tmp/.agent-kit/crew/fail5/brief.md" >"$tmp/.agent-kit/crew/fail5/meta"
+printf 'schema=ak-crew-state.v1\nstate=running\n' >"$tmp/.agent-kit/crew/fail5/state"
+run crew-fail fail5 "worktree dead after machine move" >/dev/null
+run crew-finish --abandon fail5 >/dev/null 2>&1 || fail "D5: missing-worktree failed crew could not be abandoned"
+grep -q '^state=done$' "$tmp/.agent-kit/crew/fail5/state" || fail "D5: state not done after abandon"
+ok "D5 OK (missing worktree tolerated for failed+abandon)"
+
+echo "== D6. guards kept: genuine-report crews cannot be finished dirty/reportless =="
+wt6="$tmp/wt-g1"
+git -C "$tmp" worktree add -q -b ak/g1 "$wt6" HEAD >/dev/null 2>&1 || git -C "$tmp" worktree add -b ak/g1 "$wt6" HEAD >/dev/null
+mkdir -p "$tmp/.agent-kit/crew/g1"
+printf 'slug=g1\nrepo=%s\nworktree=%s\nbranch=ak/g1\nvcs=git\nbrief=%s\n' \
+    "$tmp" "$wt6" "$tmp/.agent-kit/crew/g1/brief.md" >"$tmp/.agent-kit/crew/g1/meta"
+printf 'schema=ak-crew-state.v1\nstate=reported\n' >"$tmp/.agent-kit/crew/g1/state"
+printf '# Crew report: g1\n\ngenuine report\n' >"$tmp/.agent-kit/crew/g1/report.md"
+printf 'uncommitted salvage\n' >"$wt6/dirty.txt"
+run crew-finish --abandon g1 >/dev/null 2>&1 && fail "D6: dirty reported crew was finished (work destroyed?)"
+[ -f "$wt6/dirty.txt" ] || fail "D6: dirty worktree content was destroyed"
+mkcrew g2
+run crew-finish --abandon g2 >/dev/null 2>&1 && fail "D6: running crew finished with --abandon and no report"
+mkcrew g3
+printf 'schema=ak-crew-state.v1\nstate=reported\n' >"$tmp/.agent-kit/crew/g3/state"
+run crew-finish --abandon g3 >/dev/null 2>&1 && fail "D6: reportless reported crew was finished"
+ok "D6 OK (dirty/reportless guards intact for non-failed crews)"
 
 echo "protocol-adversarial self-test: PASS"
