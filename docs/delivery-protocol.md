@@ -72,6 +72,8 @@ state=<spawning|running|reported|done|failed>
 started_at=<utc>      # set once on running
 reported_at=<utc>     # set once on reported
 finished_at=<utc>     # set once on done
+failed_at=<utc>       # set once on failed (spawn failure or ak crew-fail)
+failed_reason=<one-line>  # recorded by ak crew-fail; flattened, last-wins
 undelivered_at=<utc>  # optional, single authoritative value (last-wins)
 ```
 
@@ -87,6 +89,31 @@ reported -> reported | done      # reported->reported is idempotent re-report
 done     -> done                 # idempotent re-finish
 failed   -> spawning | done      # re-brief, or abandon (--abandon)
 ```
+
+Entering `failed`:
+
+- `ak crew-spawn` writes `state=failed` when a crew is created but its
+  startup prompt was never accepted (the crew is running without its brief).
+- `ak crew-fail <slug> [reason text...]` is the supervisor path to retire a
+  crew that will never report on its own (stuck, crashed, or wedged worker).
+  It transitions `spawning`/`running` -> `failed` under the per-crew lock and
+  records `failed_at` plus a one-line flattened `failed_reason`. Any other
+  source state (including `failed` itself and `done`) fails loudly.
+
+Leaving `failed`:
+
+- `failed -> done`: `ak crew-finish --abandon <slug>` retires a failed crew
+  **without a report** (a failed crew never got to report - demanding one is
+  the abandon deadlock). A **missing** worktree, a dead/absent Herdr tab, and
+  an unregistered VCS workspace are tolerated (warned, then proceeded) so
+  retirement cannot wedge on leftovers. Guards that protect salvageable work
+  stay in force: a **dirty** worktree and a non-empty jj workspace change
+  still refuse, and `--abandon` changes nothing for `reported`/`done` crews
+  (they still require a genuine report and a clean worktree).
+- `failed -> spawning` (re-brief) is defined by the state machine but not yet
+  driven by any command: a steered message cannot be answered by a failed
+  crew (`crew-report` rejects it), so re-briefing currently means abandoning
+  and re-spawning. Known residual.
 
 ### 2.5 Pending reply — `.agent-kit/crew/<slug>/pending/<corr>`
 
@@ -145,7 +172,11 @@ constant line (the same every ring, derived only from the inbox path):
 `ak ack [<slug>] [<seq|path>]` moves the record from `inbox/` to `inbox/handled/`
 and clears its ring-state entry. The move is the acknowledgement. With no
 sequence argument it acknowledges all pending records in numeric order and lists
-what it acknowledged.
+what it acknowledged. Acknowledgement is idempotent: re-acknowledging a record
+that already sits in `handled/` is a no-op that exits 0 (`already acked`), and
+the move is re-checked under the per-crew lock so two racing acks of the same
+record never lose or duplicate it; an unknown record (nowhere on disk) still
+exits 1.
 
 The generated worker brief states the contract concretely, including the exact
 `ak ack <seq>` command and that without the ack the primary will ring again and
@@ -166,10 +197,29 @@ For each unacked `ack-required` record:
   dead/missing (`agent_not_found`), no keystroke is sent and the record is
   escalated directly. Anything uncertain (`unknown`) is rung (false-`dead`
   asymmetry).
+- **Every attempt consumes a rung, typed or not.** The first ring attempt is
+  recorded in the ring-state even when the keystroke failed (uncertain
+  target), and a failed re-ring still counts toward `AK_INBOX_RING_MAX` - so
+  a record that can never be rung is still escalated after the max instead
+  of sitting untracked forever. Only a positively dead target escalates
+  without consuming rungs.
 
-The ladder is driven synchronously by `ak crew-sweep <slug>` (there is no
-background watcher). It is observable via `ak crew-audit`, which shows per-crew
-pending record count, age, and attempt count.
+The ladder is driven synchronously, with **no background watcher**:
+
+- `ak crew-send <slug> ...` advances that crew's ladder (and pending-reply
+  recovery, §6) before delivering each new message, so every steer makes
+  outstanding unacked/uncorrelated messages progress.
+- `ak crew-sweep <slug>` drives one crew; `ak crew-sweep` with no argument
+  drives **every** crew (all crews under `.agent-kit/crew/`).
+
+Operational consequence, stated plainly: the re-ring guarantee is only as
+alive as the primary. If the primary steers or sweeps at least once per grace
+window, unacked records are re-rung and escalate on schedule. If the primary
+goes entirely silent, nothing re-rings - but nothing is lost either: the
+on-disk inbox record, ring-state, and escalation markers remain the durable
+truth, and the very next `crew-send`/`crew-sweep` (whichever comes first)
+advances the ladder again. Ladder progress is observable via `ak crew-audit`,
+which shows per-crew pending record count, age, and attempt count.
 
 ## 6. Correlation / pending-reply expectation
 
@@ -182,12 +232,17 @@ When the primary sends an `ack-required` steer that expects a reply
    `crew-report` carry it (as `corr=<hex>`).
 3. The expectation is resolved **only** by a correlated report carrying the
    token — never by transport success, never by the chat transcript.
-4. If a turn completes with no correlated report, `ak crew-sweep` sends
-   **exactly one** automatic recovery request (phase `waiting` →
-   `recovery-sent`), then escalates **once** if that also completes without a
-   correlated report (`recovery-sent` → `escalated`). It never loops, never
-   repeatedly injects, never silently expires. Escalation opens a durable keyed
-   marker that is closed when the expectation is finally resolved.
+4. If a turn completes with no correlated report, the next `ak crew-send` steer
+   or `ak crew-sweep` (per-crew or global) sends **exactly one** automatic
+   recovery request (phase `waiting` → `recovery-sent`, after the grace
+   period measured from `created_at`), then escalates **once** if that also
+   completes without a correlated report (`recovery-sent` → `escalated`,
+   after the grace period measured from `recovered_at`). It never loops,
+   never repeatedly injects, never silently expires. The exactly-once
+   decisions are re-checked under the per-crew lock, so concurrent sweeps
+   cannot double-send a recovery or double-escalate. Escalation opens a
+   durable keyed marker that is closed when the expectation is finally
+   resolved.
 
 ## 7. Locks
 
@@ -198,6 +253,16 @@ When the primary sends an `ack-required` steer that expects a reply
 - `.agent-kit/locks/crew-spawn.lock` continues to guard worktree creation.
 - `crew-finish` holds the per-crew lock for its whole run, so it can never tear
   down a worktree while a report is in flight.
+- **Stale-lock reclamation.** Every holder records its pid in
+  `<lock>.lock.pid` and releases both files on exit (including trapped
+  signals). A waiter that finds a recorded holder that is positively dead
+  (`kill -0` fails) claims the stale lock by renaming the pid record - only
+  one reclaimer can win the rename, so racing reclaimers cannot both take the
+  lock - then tears down and retakes the lock directory. A lock with no pid
+  record (legacy) is reclaimed by age after `AK_LOCK_STALE_SECS` (default 300).
+  Residual: if a dead holder's pid was recycled by an unrelated live process,
+  reclamation stalls until the waiter's 60s lock timeout fails loudly; there
+  is no pid-identity check beyond `kill -0` in POSIX sh.
 
 ## 8. Exit codes
 
@@ -215,11 +280,17 @@ Per-command contract:
   keystroke never changes the exit code.**
 - `ak ack` → 0 (acknowledged, or nothing to ack); 1 unknown crew/record; 2 usage.
 - `crew-sweep` → 0 on success; 1 unknown crew; 2 usage.
-- `crew-report` → 0 report written + wake confirmed; non-zero (the backend's 1 = send failed / 2 = unconfirmed acceptance) if the wake failed after the report was written, with `undelivered_at` recorded; 1 if the report was rejected (finished/failed crew); 2 usage.
+- `crew-report` → 0 report written + wake confirmed; non-zero (the backend's 1 = send failed / 2 = unconfirmed acceptance) if the wake failed after the report was written, with `undelivered_at` recorded; 1 if the report was rejected (finished/failed crew); 2 usage. Note: herdr >= 0.9 rejects submitting a prompt into a blocked agent, which surfaces here as a wake failure (1) with `undelivered_at` recorded - the report itself is durable and the wake is retried on the next report/steer.
 - `crew-report --note` → 0 note recorded, state unchanged; never flips state.
 - `crew-finish` → 0; 1 refusal (not `reported`/`done`, or `failed` without
   `--abandon`, or missing/dirty worktree, or missing report); 2 usage. A
-  **missing** worktree is reported distinctly from a **dirty** one.
+  **missing** worktree is reported distinctly from a **dirty** one. For a
+  `failed` crew finished with `--abandon`, no report is required and a missing
+  worktree/absent tab/unregistered workspace are tolerated (§2.4); a dirty
+  worktree or non-empty jj workspace change still refuses.
+- `crew-fail` → 0 (`spawning`/`running` -> `failed`, reason recorded); 1
+  unknown crew or illegal source state (including an already-`failed` crew,
+  which points at `crew-finish --abandon`); 2 usage.
 - `crew-spawn` → 0 only when the crew reached `running` (startup prompt
   accepted); 1 otherwise with `state=failed` written and a recovery command
   printed; 2 usage.
@@ -230,6 +301,7 @@ Per-command contract:
 |---|---|---|
 | `AK_INBOX_GRACE_SECS` | 90 | Seconds between re-ring attempts for an unacked ack-required record. |
 | `AK_INBOX_RING_MAX` | 3 | Max doorbell ring attempts before escalation. |
+| `AK_LOCK_STALE_SECS` | 300 | Max age (s) before a lock directory without a pid record is reclaimed as stale. |
 | `AK_WAKE_ACCEPT_TIMEOUT` | 8000 | ms to wait for a woken agent to enter `working`. |
 | `AK_CREW_STARTUP_TIMEOUT` | 120000 | ms overall deadline for startup-prompt acceptance. |
 | `AK_CREW_READY_TIMEOUT` | 15000 | ms to wait for the crew pane to be input-ready. |
@@ -241,7 +313,8 @@ Per-command contract:
 
 ## 10. Command surface (additive)
 
-New commands: `ak ack`, `ak crew-sweep`, and `ak crew-report --note`. All
+New commands: `ak ack`, `ak crew-sweep`, `ak crew-fail`, and `ak crew-report
+--note`. `ak crew-sweep` accepts no argument (sweep every crew). All
 pre-existing command names and argument shapes are preserved. `ak chat` remains
 the human-readable transcript and is no longer the delivery mechanism (but is
 not removed).

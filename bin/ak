@@ -27,10 +27,11 @@ Usage:
   ak crew-cost-prompt [message...]
   ak crew-peek <slug> [lines]
   ak crew-send <slug> <message text...>
-  ak crew-sweep <slug>
+  ak crew-sweep [<slug>]
   ak ack [<slug>] [<seq|path>]
   ak chat [<slug>] [lines]
   ak crew-finish [--abandon] <slug> [report text...]
+  ak crew-fail <slug> [reason text...]
   ak docs [list|show <name>]
 
 Worker commands (run from inside a crew worktree):
@@ -66,6 +67,8 @@ Environment:
                          ack-required inbox record (default: 90)
   AK_INBOX_RING_MAX     max doorbell ring attempts before escalation
                          (default: 3)
+  AK_LOCK_STALE_SECS    max age in seconds before a lock directory without
+                         a pid record is reclaimed as stale (default: 300)
   AK_DEBUG_WAKE         when set to a file path, append each framed primary
                          wake line there (test/diagnostic hook)
   AK_NO_NOTIFY           disable backend notifications when set to 1
@@ -230,6 +233,30 @@ lock_acquire() {
     mkdir -p "$(dirname "$lockdir")"
     i=0
     while ! mkdir "$lockdir" 2>/dev/null; do
+        pidfile="$lockdir.pid"
+        if [ -f "$pidfile" ]; then
+            holder=$(cat "$pidfile" 2>/dev/null || true)
+            if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+                # Holder is gone (killed, never released). Claim the stale
+                # lock by renaming its pid record first: only one reclaimer
+                # can win the rename, so two racing reclaimers can never both
+                # tear the lock down and both end up holding it.
+                if mv "$pidfile" "$pidfile.claim.$$" 2>/dev/null; then
+                    rm -rf "$lockdir" 2>/dev/null || true
+                    rm -f "$pidfile.claim.$$" 2>/dev/null || true
+                    continue
+                fi
+                # Lost the reclaim race; fall through, sleep and retry.
+            fi
+        else
+            # Legacy lock without a pid record: reclaim by age as a last resort.
+            now=$(date +%s)
+            mtime=$(stat -f %m "$lockdir" 2>/dev/null || stat -c %Y "$lockdir" 2>/dev/null || printf '%s' "$now")
+            if [ "$((now - mtime))" -gt "${AK_LOCK_STALE_SECS:-300}" ]; then
+                rm -rf "$lockdir" 2>/dev/null || true
+                continue
+            fi
+        fi
         i=$((i + 1))
         if [ "$i" -ge 120 ]; then
             printf 'timed out waiting for lock: %s\n' "$lockdir" >&2
@@ -237,12 +264,14 @@ lock_acquire() {
         fi
         sleep 0.5
     done
+    printf '%s\n' "$$" >"$lockdir.pid"
     AK_LOCK_DIR=$lockdir
-    trap 'if [ -n "${AK_LOCK_DIR:-}" ]; then rmdir "$AK_LOCK_DIR" 2>/dev/null || true; fi' EXIT HUP INT TERM
+    trap 'lock_release' EXIT HUP INT TERM
 }
 
 lock_release() {
     if [ -n "${AK_LOCK_DIR:-}" ]; then
+        rm -f "$AK_LOCK_DIR.pid" 2>/dev/null || true
         rmdir "$AK_LOCK_DIR" 2>/dev/null || true
         AK_LOCK_DIR=
         trap - EXIT HUP INT TERM
@@ -315,7 +344,11 @@ herdr_workspace_id() {
     label=$2
     herdr_server_ensure "$session"
     if out=$(herdr workspace list --session "$session" 2>/dev/null); then
-        id=$(printf '%s' "$out" | jq -r --arg label "$label" '(.result.workspaces // .workspaces // [])[] | select(.label == $label) | (.workspace_id // .id) ' 2>/dev/null | head -n 1)
+        # Match the label with or without herdr's "[N] " index prefix: some
+        # herdr generations/flows persist decorated labels (e.g. "[2] agent-kit"
+        # for a workspace created as "agent-kit"), and an exact-only match
+        # would miss them and leak a new workspace on every lookup.
+        id=$(printf '%s' "$out" | jq -r --arg label "$label" '(.result.workspaces // .workspaces // [])[] | select(.label == $label or ((.label // "") | sub("^\\[[0-9]+\\] "; "") == $label)) | (.workspace_id // .id) ' 2>/dev/null | head -n 1)
         [ -n "$id" ] && {
             printf '%s' "$id"
             return 0
@@ -380,6 +413,22 @@ herdr_valid_agent_name() {
 # (and not warned about) on every spawn.
 herdr_agent_pane_attach_supported() {
     herdr agent start --help 2>&1 | grep -q -- '--pane'
+}
+
+# Whether this herdr exposes the 0.9 `agent prompt` surface: submitting a
+# full agent turn (text + Enter) in one call. Older herdr only had
+# `agent send` (literal text; the caller supplied the Enter key separately).
+# Probe the flag instead of pinning a version, so the unsupported attempt is
+# skipped on every wake - the same pattern herdr_agent_pane_attach_supported
+# uses for spawn.
+herdr_agent_prompt_supported() {
+    herdr agent --help 2>&1 | grep -qE '^  prompt '
+}
+
+# Whether `agent wait` matches states with the 0.9 `--until` flag (renamed
+# from the older `--status`). Probed per call so both herdr generations work.
+herdr_agent_wait_until_supported() {
+    herdr agent wait --help 2>&1 | grep -q -- '--until'
 }
 
 # Start a known agent kind in an existing pane, retrying briefly while the
@@ -753,6 +802,7 @@ crew_state_write() {
     running) ts_key=started_at ;;
     reported) ts_key=reported_at ;;
     done) ts_key=finished_at ;;
+    failed) ts_key=failed_at ;;
     esac
     tmp="$f.tmp-$$"
     {
@@ -760,8 +810,8 @@ crew_state_write() {
         printf 'state=%s\n' "$state"
         if [ -f "$f" ]; then
             awk -F= -v k="$ts_key" '
-                $1!="schema" && $1!="state" && $1!="started_at" && $1!="reported_at" && $1!="finished_at" {print}
-                ($1=="started_at" || $1=="reported_at" || $1=="finished_at") && ($1 != k) {print}
+                $1!="schema" && $1!="state" && $1!="started_at" && $1!="reported_at" && $1!="finished_at" && $1!="failed_at" {print}
+                ($1=="started_at" || $1=="reported_at" || $1=="finished_at" || $1=="failed_at") && ($1 != k) {print}
             ' "$f"
         fi
         if [ -n "$ts_key" ]; then printf '%s=%s\n' "$ts_key" "$now"; fi
@@ -798,7 +848,7 @@ mark_wake_undelivered() {
         awk -F= '$1!="undelivered_at" {print}' "$f" >"$tmp"
         printf 'undelivered_at=%s\n' "$now" >>"$tmp"
     else
-        printf 'undelivered_at=%s\n' "$now" >"$tmp"
+        printf 'schema=ak-crew-state.v1\nstate=spawning\nundelivered_at=%s\n' "$now" >"$tmp"
     fi
     mv "$tmp" "$f"
     lock_release
@@ -847,8 +897,8 @@ inbox_write() {
         printf 'delivery=%s\n' "$delivery"
         printf -- '--\n'
         printf '%s\n' "$body"
-    } >"$tmp"
-    mv "$tmp" "$file"
+    } >"$tmp" || { rm -f "$tmp" 2>/dev/null || true; return 1; }
+    mv "$tmp" "$file" || { rm -f "$tmp" 2>/dev/null || true; return 1; }
     printf '%s\n' "$seqp"
 }
 
@@ -946,14 +996,24 @@ inbox_ring_initial() {
     root=$1 slug=$2 seq=$3
     inbox=$(inbox_dir "$root" "$slug")
     line=$(inbox_doorbell_line "$inbox")
-    if inbox_ring "$root" "$slug" "$line"; then
-        inbox_ring_state_set "$root" "$slug" "$seq" 1 "$(date +%s)"
-        return 0
-    else
-        rc=$?
-        [ "$rc" = 3 ] && inbox_escalate "$root" "$slug" "$seq"
+    rc=0
+    inbox_ring "$root" "$slug" "$line" || rc=$?
+    if [ "$rc" = 3 ]; then
+        # Positively dead/missing target: escalate directly, without typing.
+        inbox_escalate "$root" "$slug" "$seq"
         return 1
     fi
+    # Record the first attempt even when the keystroke failed (uncertain
+    # target): without a ring-state entry the record would never enter the
+    # ladder (inbox_sweep skips epoch=0 entries) and would sit unacked
+    # forever - neither re-rung nor escalated, silently dropped. Tracking it
+    # keeps the guarantee: later sweeps re-attempt up to the max, then
+    # escalate.
+    inbox_ring_state_set "$root" "$slug" "$seq" 1 "$(date +%s)"
+    if [ "$rc" = 0 ]; then
+        return 0
+    fi
+    return 1
 }
 
 # The bounded re-ring ladder: one ring attempt per grace period per unacked
@@ -971,8 +1031,8 @@ inbox_sweep() {
         [ -f "$f" ] || continue
         seq=$(basename "$f" .msg)
         case "$seq" in [0-9]*) ;; *) continue ;; esac
-        delivery=$(awk -F= '$1=="delivery"{print $2; exit}' "$f")
-        [ "$delivery" = ack-required ] || continue
+        rec_delivery=$(awk -F= '$1=="delivery"{print $2; exit}' "$f")
+        [ "$rec_delivery" = ack-required ] || continue
         [ -e "$(inbox_escalated_dir "$root" "$slug")/$seq" ] && continue
         set -- $(inbox_ring_state_get "$root" "$slug" "$seq")
         count=${1:-0} epoch=${2:-0}
@@ -981,12 +1041,18 @@ inbox_sweep() {
             continue
         fi
         if [ "$epoch" -gt 0 ] && [ $((now - epoch)) -ge "$grace" ]; then
-            if inbox_ring "$root" "$slug" "$line"; then
-                inbox_ring_state_set "$root" "$slug" "$seq" $((count + 1)) "$now"
-            else
-                rc=$?
-                [ "$rc" = 3 ] && inbox_escalate "$root" "$slug" "$seq"
+            rc=0
+            inbox_ring "$root" "$slug" "$line" || rc=$?
+            if [ "$rc" = 3 ]; then
+                inbox_escalate "$root" "$slug" "$seq"
+                continue
             fi
+            # Count the attempt even when the keystroke failed (uncertain
+            # target): attempts must stay bounded, so a never-ackable,
+            # never-ringable record still escalates after the max instead of
+            # sitting untracked/unrung forever. Positively dead targets
+            # (agent_not_found) escalated directly above.
+            inbox_ring_state_set "$root" "$slug" "$seq" $((count + 1)) "$now"
         fi
     done
     lock_release
@@ -1026,16 +1092,23 @@ pending_recover() {
     root=$1 slug=$2 corr=$3
     f="$(pending_dir "$root" "$slug")/$corr"
     [ -f "$f" ] || return 0
-    summary=$(awk -F= '$1=="request_summary"{print $2; exit}' "$f")
-    id=$(rand_hex)
-    at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    body="Recovery request: no correlated reply arrived for your earlier steer. Please report back now with: ak done \"summary ... corr=$corr\" (original request: $summary)"
     lock_acquire "$root/.agent-kit/locks/crew-$slug.lock"
-    seq=$(inbox_write "$root" "$slug" "$id" "$at" ack-required "$body")
-    tmp="$f.tmp-$$"
-    awk -F= '$1!="phase" {print} END{print "phase=recovery-sent"}' "$f" >"$tmp"
-    mv "$tmp" "$f"
-    inbox_ring_initial "$root" "$slug" "$seq" || true
+    # Re-check under the lock so two concurrent sweeps cannot both send a
+    # recovery (the "exactly one recovery" guarantee).
+    phase=$(awk -F= '$1=="phase"{print $2; exit}' "$f")
+    if [ "$phase" != waiting ]; then
+        lock_release
+        return 0
+    fi
+    summary=$(awk -F= '$1=="request_summary"{print $2; exit}' "$f")
+    rec_id=$(rand_hex)
+    rec_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    rec_body="Recovery request: no correlated reply arrived for your earlier steer. Please report back now with: ak done \"summary ... corr=$corr\" (original request: $summary)"
+    rec_seq=$(inbox_write "$root" "$slug" "$rec_id" "$rec_at" ack-required "$rec_body")
+    rec_tmp="$f.tmp-$$"
+    awk -F= -v t="recovered_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" '$1!="phase" && $1!="recovered_at" {print} END{print "phase=recovery-sent"; print t}' "$f" >"$rec_tmp"
+    mv "$rec_tmp" "$f"
+    inbox_ring_initial "$root" "$slug" "$rec_seq" || true
     lock_release
     printf 'recovery request sent for crew %s (corr %s)\n' "$slug" "$corr"
 }
@@ -1043,13 +1116,21 @@ pending_recover() {
 # Escalate a pending expectation exactly once (durable keyed decision).
 pending_escalate() {
     root=$1 slug=$2 corr=$3
+    f="$(pending_dir "$root" "$slug")/$corr"
+    lock_acquire "$root/.agent-kit/locks/crew-$slug.lock"
+    # Re-check under the lock so a stale racer cannot escalate twice.
+    phase=$(awk -F= '$1=="phase"{print $2; exit}' "$f")
+    if [ "$phase" != recovery-sent ]; then
+        lock_release
+        return 0
+    fi
     d=$(pending_escalated_dir "$root" "$slug")
     mkdir -p "$d"
     printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$d/$corr"
-    f="$(pending_dir "$root" "$slug")/$corr"
     tmp="$f.tmp-$$"
     awk -F= '$1!="phase" {print} END{print "phase=escalated"}' "$f" >"$tmp"
     mv "$tmp" "$f"
+    lock_release
     backend_notify "$(primary_session 2>/dev/null || printf '%s' "${AK_HERDR_SESSION:-default}")" \
         "agent-kit escalation" "crew $slug: expected reply $corr escalated"
 }
@@ -1065,13 +1146,29 @@ pending_sweep() {
     status=
     [ -n "$pane" ] && [ -n "$session" ] && status=$(backend_agent_status "$session" "$pane")
     case "$status" in working | blocked) return 0 ;; esac
+    grace=${AK_INBOX_GRACE_SECS:-90}
+    now=$(date +%s)
     for f in "$d"/*; do
         [ -f "$f" ] || continue
         corr=$(basename "$f")
         phase=$(awk -F= '$1=="phase"{print $2; exit}' "$f")
         case "$phase" in
-        waiting) pending_recover "$root" "$slug" "$corr" ;;
-        recovery-sent) pending_escalate "$root" "$slug" "$corr" ;;
+        waiting)
+            created=$(awk -F= '$1=="created_at"{print $2; exit}' "$f")
+            e=$(iso_epoch "$created" 2>/dev/null || true)
+            if [ -n "$e" ] && [ $((now - e)) -lt "$grace" ]; then
+                continue
+            fi
+            pending_recover "$root" "$slug" "$corr"
+            ;;
+        recovery-sent)
+            recovered=$(awk -F= '$1=="recovered_at"{print $2; exit}' "$f")
+            e=$(iso_epoch "$recovered" 2>/dev/null || true)
+            if [ -n "$e" ] && [ $((now - e)) -lt "$grace" ]; then
+                continue
+            fi
+            pending_escalate "$root" "$slug" "$corr"
+            ;;
         esac
     done
 }
@@ -1082,7 +1179,7 @@ frame_message() {
     slug=$1
     shift
     text=$*
-    text=$(printf '%s' "$text" | tr '\t\n' ' ')
+    text=$(printf '%s' "$text" | tr '\t\n\r' ' ')
     printf '[crew %s] %s' "$slug" "$text"
 }
 
@@ -1400,7 +1497,7 @@ EOF
             crew_state_transition "$root" "$slug" failed || true
             printf 'error: crew %s was created in pane %s but its startup prompt was NOT delivered; the crew is running without its brief.\n' "$slug" "$HERDR_CREATED_PANE" >&2
             printf 'error: crew state is at %s; deliver the brief manually with:\n  %s crew-send %s "Read %s and begin."\n' "$crew_dir" "$ak_cmd" "$slug" "$crew_dir/brief.md" >&2
-            printf 'error: once handled, remove the crew with: %s crew-finish %s\n' "$ak_cmd" "$slug" >&2
+            printf 'error: once handled, retire the crew with: %s crew-finish --abandon %s\n' "$ak_cmd" "$slug" >&2
             exit 1
         fi
         crew_state_transition "$root" "$slug" running || {
@@ -1672,6 +1769,48 @@ crew_resume() {
   fi
 }
 
+# Supervisor path to retire a crew that will never report on its own (a
+# stuck, crashed, or wedged worker). Transitions spawning/running -> failed
+# under the per-crew lock and records the reason durably in the state file
+# (failed_at + one-line failed_reason). A failed crew is then retired with
+# `ak crew-finish --abandon` (no report required); it can never silently
+# flip back to running - only the state machine decides transitions.
+crew_fail() {
+    [ "$#" -ge 1 ] || {
+        printf 'usage: ak crew-fail <slug> [reason text...]\n' >&2
+        exit 2
+    }
+    slug=$(slugify "$1")
+    shift
+    reason=$*
+    [ -n "$reason" ] || reason='retired by supervisor (no reason given)'
+    root=$(repo_root)
+    meta=$(crew_meta_path "$slug")
+    [ -f "$meta" ] || { printf 'unknown crew: %s\n' "$slug" >&2; exit 1; }
+    lock_acquire "$root/.agent-kit/locks/crew-$slug.lock"
+    cur=$(crew_state_get "$root" "$slug")
+    if [ "$cur" = failed ]; then
+        printf 'crew %s is already failed; retire it with: %s crew-finish --abandon %s\n' "$slug" "$(self_path)" "$slug" >&2
+        lock_release
+        exit 1
+    fi
+    if ! crew_state_valid_transition "$cur" failed; then
+        printf 'illegal crew state transition: %s -> failed (crew %s)\n' "$cur" "$slug" >&2
+        lock_release
+        exit 1
+    fi
+    crew_state_write "$root" "$slug" failed
+    # Record the reason durably as one flattened key=value line (last-wins).
+    f=$(crew_state_path "$root" "$slug")
+    tmp="$f.tmp-$$"
+    awk -F= -v r="failed_reason=$(printf '%s' "$reason" | tr '\t\n\r' '  ')" \
+        '$1!="failed_reason" {print} END{print r}' "$f" >"$tmp"
+    mv "$tmp" "$f"
+    lock_release
+    printf 'crew failed: %s (%s)\n' "$slug" "$reason"
+    printf 'retire it with: %s crew-finish --abandon %s\n' "$(self_path)" "$slug"
+}
+
 crew_finish() {
     abandon=0
     if [ "${1:-}" = "--abandon" ]; then
@@ -1714,6 +1853,14 @@ crew_finish() {
         exit 1
         ;;
     esac
+    # Abandoning a FAILED crew: it never got to report (failed spawn, or a
+    # supervisor-failed stuck worker), so no report is required; its tab and
+    # VCS workspace may already be gone, and its worktree may be missing
+    # entirely (e.g. dead after a machine move) - retirement must not wedge
+    # on any of those. Guards that protect salvageable work stay in force:
+    # a dirty worktree and a non-empty jj workspace change still refuse.
+    abandon_failed=0
+    [ "$state" = failed ] && [ "$abandon" = 1 ] && abandon_failed=1
     if [ "$#" -gt 0 ]; then
         mkdir -p "$(dirname "$report")"
         cat >"$report" <<EOF
@@ -1721,7 +1868,7 @@ crew_finish() {
 
 $*
 EOF
-    elif [ ! -f "$report" ]; then
+    elif [ ! -f "$report" ] && [ "$abandon_failed" != 1 ]; then
         printf 'report missing for crew: %s\n' "$slug" >&2
         printf 'write one with: %s crew-report %s "summary..."\n' "$ak_cmd" "$slug" >&2
         exit 1
@@ -1733,7 +1880,12 @@ EOF
     fi
     if [ "$rc" != 0 ]; then
         if [ "$rc" = 2 ]; then
-            printf 'crew worktree is missing (not dirty): %s\n' "$worktree" >&2
+            if [ "$abandon_failed" = 1 ]; then
+                printf 'crew worktree is missing; abandoning anyway: %s\n' "$worktree" >&2
+            else
+                printf 'crew worktree is missing (not dirty): %s\n' "$worktree" >&2
+                exit 1
+            fi
         else
             printf 'crew worktree is dirty; review before finishing: %s\n' "$worktree" >&2
             if [ "$vcs" = jj ]; then
@@ -1741,8 +1893,8 @@ EOF
             else
                 git -C "$worktree" status --short >&2 || true
             fi
+            exit 1
         fi
-        exit 1
     fi
     jj_change=
     if [ "$vcs" = jj ]; then
@@ -1762,14 +1914,22 @@ EOF
     fi
     if command -v herdr >/dev/null 2>&1 && [ -n "$tab" ] && [ -n "$session" ]; then
         backend_tab_close "$session" "$tab" || {
-            printf 'could not close crew tab for %s\n' "$slug" >&2
-            exit 1
+            if [ "$abandon_failed" = 1 ]; then
+                printf 'warning: could not close crew tab for %s; abandoning anyway\n' "$slug" >&2
+            else
+                printf 'could not close crew tab for %s\n' "$slug" >&2
+                exit 1
+            fi
         }
     fi
     if [ "$vcs" = jj ]; then
         jj -R "$root" workspace forget "$slug" >/dev/null 2>&1 || {
-            printf 'could not forget jj workspace %s\n' "$slug" >&2
-            exit 1
+            if [ "$abandon_failed" = 1 ]; then
+                printf 'warning: could not forget jj workspace %s; abandoning anyway\n' "$slug" >&2
+            else
+                printf 'could not forget jj workspace %s\n' "$slug" >&2
+                exit 1
+            fi
         }
         jj_abandon_empty_change "$root" "$jj_change" "agent-kit crew: $slug"
         rm -rf "$worktree" || {
@@ -1783,8 +1943,12 @@ EOF
             git_commits=$(git -C "$root" rev-list "$branch" --not $others 2>/dev/null || true)
         fi
         git -C "$root" worktree remove "$worktree" >/dev/null 2>&1 || {
-            printf 'could not remove worktree %s\n' "$worktree" >&2
-            exit 1
+            if [ "$abandon_failed" = 1 ]; then
+                printf 'warning: could not remove worktree %s; abandoning anyway\n' "$worktree" >&2
+            else
+                printf 'could not remove worktree %s\n' "$worktree" >&2
+                exit 1
+            fi
         }
         git -C "$root" branch -D "$branch" >/dev/null 2>&1 || true
         if [ -n "$git_commits" ]; then
@@ -1806,7 +1970,11 @@ EOF
     crew_state_write "$root" "$slug" done
     lock_release
     printf 'crew finished: %s\n' "$slug"
-    printf 'report: %s\n' "$report"
+    if [ -f "$report" ]; then
+        printf 'report: %s\n' "$report"
+    else
+        printf 'report: none (abandoned failed crew without a report)\n'
+    fi
 }
 
 crew_meta_field() {
@@ -1855,6 +2023,12 @@ crew_send() {
     [ -n "$id" ] || id=$(rand_hex)
     at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     inbox=$(inbox_dir "$root" "$slug")
+    # Advance the re-ring ladder and pending-reply recovery for this crew
+    # before delivering, so unacked/uncorrelated outstanding messages make
+    # progress on every steer. This is the synchronous trigger that makes the
+    # bounded-retry guarantee operational (there is no background watcher).
+    inbox_sweep "$root" "$slug" || true
+    pending_sweep "$root" "$slug" || true
     corr=
     body=$msg
     if [ "$expect_reply" = 1 ]; then
@@ -1873,7 +2047,11 @@ corr=$corr"
         inbox_ring "$root" "$slug" "$(inbox_doorbell_line "$inbox")" >/dev/null 2>&1 || true
         exit 0
     fi
-    seq=$(inbox_write "$root" "$slug" "$id" "$at" "$delivery" "$body")
+    if ! seq=$(inbox_write "$root" "$slug" "$id" "$at" "$delivery" "$body"); then
+        lock_release
+        printf 'error: could not write inbox record for crew %s\n' "$slug" >&2
+        exit 1
+    fi
     if [ "$delivery" = ack-required ]; then
         inbox_ring_initial "$root" "$slug" "$seq" || true
     fi
@@ -1888,12 +2066,23 @@ corr=$corr"
 # Drive the re-ring ladder and pending-reply recovery for one crew. This is
 # the synchronous trigger for the bounded retry/ack machinery (no watcher).
 crew_sweep() {
-    [ "$#" -ge 1 ] || {
-        printf 'usage: ak crew-sweep <slug>\n' >&2
-        exit 2
-    }
-    slug=$(slugify "$1")
     root=$(repo_root)
+    if [ "$#" -eq 0 ]; then
+        base=$(crew_base)
+        [ -d "$base" ] || { printf 'no crews to sweep\n'; return 0; }
+        swept=0
+        for meta in "$base"/*/meta; do
+            [ -f "$meta" ] || continue
+            slug=$(awk -F= '$1=="slug" {print $2; exit}' "$meta")
+            [ -n "$slug" ] || continue
+            inbox_sweep "$root" "$slug"
+            pending_sweep "$root" "$slug"
+            swept=$((swept + 1))
+        done
+        printf 'crew swept: %s crew(s)\n' "$swept"
+        return 0
+    fi
+    slug=$(slugify "$1")
     meta=$(crew_meta_path "$slug")
     [ -f "$meta" ] || { printf 'unknown crew: %s\n' "$slug" >&2; exit 1; }
     inbox_sweep "$root" "$slug"
@@ -1933,6 +2122,10 @@ ak_ack() {
         [0-9]*) f="$inbox/$(printf '%03d' "$target").msg" ;;
         *) f="$inbox/$target.msg" ;;
         esac
+        if [ ! -f "$f" ] && [ -f "$inbox/handled/$(basename "$f")" ]; then
+            printf 'already acked: %s\n' "$(basename "$f" .msg)"
+            exit 0
+        fi
         [ -f "$f" ] || { printf 'no such inbox record: %s\n' "$target" >&2; exit 1; }
         inbox_ack_one "$root" "$slug" "$f"
     else
@@ -1953,7 +2146,17 @@ inbox_ack_one() {
     mkdir -p "$handled"
     seq=$(basename "$f" .msg)
     lock_acquire "$root/.agent-kit/locks/crew-$slug.lock"
-    mv "$f" "$handled/$seq.msg"
+    if [ ! -f "$f" ]; then
+        # Already moved by a concurrent ack (idempotent re-ack).
+        lock_release
+        printf 'already acked: %s\n' "$seq"
+        return 0
+    fi
+    mv "$f" "$handled/$seq.msg" || {
+        lock_release
+        printf 'ack failed for %s\n' "$seq" >&2
+        return 1
+    }
     inbox_ring_state_del "$root" "$slug" "$seq"
     lock_release
     printf 'acked: %s\n' "$seq"
@@ -2002,7 +2205,8 @@ backend_wake() {
     herdr)
         command -v herdr >/dev/null 2>&1 || return 1
         # Probe the target's agent liveness first. Where an agent surface is
-        # available, submit via `herdr agent send` (literal text honoring the
+        # available, submit a full agent turn: `herdr agent prompt` on herdr
+        # >= 0.9, or legacy `herdr agent send` (literal text honoring the
         # pane's bracketed-paste mode) plus an explicit Enter. A plain
         # non-agent shell pane is the only fallback for raw pane input, and
         # that fallback is logged so a dead agent is never silently reported
@@ -2010,21 +2214,30 @@ backend_wake() {
         status=$(backend_agent_status "$session" "$target")
         case "$status" in
         idle | working | blocked | done)
-            if ! herdr agent send "$target" "$message" --session "$session" >/dev/null 2>&1; then
-                printf 'error: wake send failed for agent target %s\n' "$target" >&2
-                return 1
+            if herdr_agent_prompt_supported; then
+                if ! herdr agent prompt "$target" "$message" --session "$session" >/dev/null 2>&1; then
+                    printf 'error: wake send failed for agent target %s\n' "$target" >&2
+                    return 1
+                fi
+            else
+                if ! herdr agent send "$target" "$message" --session "$session" >/dev/null 2>&1; then
+                    printf 'error: wake send failed for agent target %s\n' "$target" >&2
+                    return 1
+                fi
+                if ! herdr pane send-keys "$target" enter --session "$session" >/dev/null 2>&1; then
+                    printf 'error: wake submitted to agent %s but the submit key was not confirmed\n' "$target" >&2
+                    return 2
+                fi
             fi
-            if ! herdr pane send-keys "$target" enter --session "$session" >/dev/null 2>&1; then
-                printf 'error: wake submitted to agent %s but the submit key was not confirmed\n' "$target" >&2
-                return 2
-            fi
-            # Delivering the Enter keystroke only proves the key reached the
-            # pane, not that the agent accepted the prompt. Wait for the agent
-            # to enter the working state so a swallowed Enter or a wedged agent
-            # is reported as unconfirmed instead of a false success. An agent
-            # already mid-turn is already working, so the wait returns at once
-            # and the steer is queued for the agent's next turn.
-            if ! herdr agent wait "$target" --status working --timeout "${AK_WAKE_ACCEPT_TIMEOUT:-8000}" --session "$session" >/dev/null 2>&1; then
+            # Delivering the turn only proves the text reached the pane, not
+            # that the agent accepted the prompt. Wait for the agent to enter
+            # the working state so a swallowed submit or a wedged agent is
+            # reported as unconfirmed instead of a false success. An agent
+            # already mid-turn is already working, so the wait returns at
+            # once and the steer is queued for the agent's next turn.
+            wait_state_flag=--status
+            herdr_agent_wait_until_supported && wait_state_flag=--until
+            if ! herdr agent wait "$target" "$wait_state_flag" working --timeout "${AK_WAKE_ACCEPT_TIMEOUT:-8000}" --session "$session" >/dev/null 2>&1; then
                 printf 'error: wake was submitted to agent %s but it did not enter working state within %sms (not confirmed accepted)\n' "$target" "${AK_WAKE_ACCEPT_TIMEOUT:-8000}" >&2
                 return 2
             fi
@@ -2253,7 +2466,7 @@ chat_append() {
     msg=$*
     log=$(chat_path "$root" "$slug")
     mkdir -p "$(dirname "$log")" 2>/dev/null || return 0
-    msg=$(printf '%s' "$msg" | tr '\t\n' '  ')
+    msg=$(printf '%s' "$msg" | tr '\t\n\r' '  ')
     printf '%s\t%s\t%s\n' "$who" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$msg" >>"$log"
 }
 
@@ -2538,6 +2751,10 @@ ack)
 crew-finish)
     shift
     crew_finish "$@"
+    ;;
+crew-fail)
+    shift
+    crew_fail "$@"
     ;;
 docs)
     shift

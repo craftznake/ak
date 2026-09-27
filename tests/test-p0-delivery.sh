@@ -20,7 +20,7 @@ cleanup() {
     # initial tab named after the scratch dir, and `tab close` refuses to close
     # a workspace's last tab, so only `workspace close` fully removes it.
     wsid=$(herdr workspace list --session "$SESSION" 2>/dev/null \
-        | jq -r --arg l "$AK_HERDR_WORKSPACE" '(.result.workspaces // .workspaces // [])[] | select(.label == $l) | (.workspace_id // .id)' 2>/dev/null | head -n 1)
+        | jq -r --arg l "$AK_HERDR_WORKSPACE" '(.result.workspaces // .workspaces // [])[] | select(.label == $l or ((.label // "") | sub("^\\[[0-9]+\\] "; "") == $l)) | (.workspace_id // .id)' 2>/dev/null | head -n 1)
     [ -n "$wsid" ] && herdr workspace close "$wsid" --session "$SESSION" >/dev/null 2>&1 || true
     rm -rf "$tmp"
 }

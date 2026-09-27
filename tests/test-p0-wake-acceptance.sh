@@ -27,7 +27,7 @@ cleanup() {
     # initial tab named after the scratch dir, and `tab close` refuses to
     # close a workspace's last tab, so only `workspace close` fully removes it.
     wsid=$(herdr workspace list --session "$SESSION" 2>/dev/null \
-        | jq -r --arg l "$AK_HERDR_WORKSPACE" '(.result.workspaces // .workspaces // [])[] | select(.label == $l) | (.workspace_id // .id)' 2>/dev/null | head -n 1)
+        | jq -r --arg l "$AK_HERDR_WORKSPACE" '(.result.workspaces // .workspaces // [])[] | select(.label == $l or ((.label // "") | sub("^\\[[0-9]+\\] "; "") == $l)) | (.workspace_id // .id)' 2>/dev/null | head -n 1)
     [ -n "$wsid" ] && herdr workspace close "$wsid" --session "$SESSION" >/dev/null 2>&1 || true
     rm -rf "$tmp"
 }
@@ -80,7 +80,11 @@ esac
 echo "settled status: $status"
 
 echo "== acceptance probe must be a real signal: times out against a settled, non-woken agent =="
-if herdr agent wait "$PANE" --status working --timeout 800 --session "$SESSION" >/dev/null 2>&1; then
+# herdr 0.9 renamed `agent wait --status` to `--until`; probe the surface so
+# the suite asserts the same behavior on both herdr generations.
+wait_state_flag=--status
+herdr agent wait --help 2>&1 | grep -q -- '--until' && wait_state_flag=--until
+if herdr agent wait "$PANE" "$wait_state_flag" working --timeout 800 --session "$SESSION" >/dev/null 2>&1; then
     echo "FAIL: agent wait --status working returned success on a non-woken settled agent" >&2
     exit 1
 fi
