@@ -27,7 +27,7 @@ Usage:
   ak crew-cost-prompt [message...]
   ak crew-peek <slug> [lines]
   ak crew-send <slug> <message text...>
-  ak crew-sweep <slug>
+  ak crew-sweep [<slug>]
   ak ack [<slug>] [<seq|path>]
   ak chat [<slug>] [lines]
   ak crew-finish [--abandon] <slug> [report text...]
@@ -230,6 +230,24 @@ lock_acquire() {
     mkdir -p "$(dirname "$lockdir")"
     i=0
     while ! mkdir "$lockdir" 2>/dev/null; do
+        pidfile="$lockdir.pid"
+        if [ -f "$pidfile" ]; then
+            holder=$(cat "$pidfile" 2>/dev/null || true)
+            if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+                # Holder is gone (killed, never released): reclaim the stale lock.
+                rm -rf "$lockdir" 2>/dev/null || true
+                rm -f "$pidfile" 2>/dev/null || true
+                continue
+            fi
+        else
+            # Legacy lock without a pid record: reclaim by age as a last resort.
+            now=$(date +%s)
+            mtime=$(stat -f %m "$lockdir" 2>/dev/null || stat -c %Y "$lockdir" 2>/dev/null || printf '%s' "$now")
+            if [ "$((now - mtime))" -gt "${AK_LOCK_STALE_SECS:-300}" ]; then
+                rm -rf "$lockdir" 2>/dev/null || true
+                continue
+            fi
+        fi
         i=$((i + 1))
         if [ "$i" -ge 120 ]; then
             printf 'timed out waiting for lock: %s\n' "$lockdir" >&2
@@ -237,12 +255,14 @@ lock_acquire() {
         fi
         sleep 0.5
     done
+    printf '%s\n' "$$" >"$lockdir.pid"
     AK_LOCK_DIR=$lockdir
-    trap 'if [ -n "${AK_LOCK_DIR:-}" ]; then rmdir "$AK_LOCK_DIR" 2>/dev/null || true; fi' EXIT HUP INT TERM
+    trap 'lock_release' EXIT HUP INT TERM
 }
 
 lock_release() {
     if [ -n "${AK_LOCK_DIR:-}" ]; then
+        rm -f "$AK_LOCK_DIR.pid" 2>/dev/null || true
         rmdir "$AK_LOCK_DIR" 2>/dev/null || true
         AK_LOCK_DIR=
         trap - EXIT HUP INT TERM
@@ -798,7 +818,7 @@ mark_wake_undelivered() {
         awk -F= '$1!="undelivered_at" {print}' "$f" >"$tmp"
         printf 'undelivered_at=%s\n' "$now" >>"$tmp"
     else
-        printf 'undelivered_at=%s\n' "$now" >"$tmp"
+        printf 'schema=ak-crew-state.v1\nstate=spawning\nundelivered_at=%s\n' "$now" >"$tmp"
     fi
     mv "$tmp" "$f"
     lock_release
@@ -847,8 +867,8 @@ inbox_write() {
         printf 'delivery=%s\n' "$delivery"
         printf -- '--\n'
         printf '%s\n' "$body"
-    } >"$tmp"
-    mv "$tmp" "$file"
+    } >"$tmp" || { rm -f "$tmp" 2>/dev/null || true; return 1; }
+    mv "$tmp" "$file" || { rm -f "$tmp" 2>/dev/null || true; return 1; }
     printf '%s\n' "$seqp"
 }
 
@@ -971,8 +991,8 @@ inbox_sweep() {
         [ -f "$f" ] || continue
         seq=$(basename "$f" .msg)
         case "$seq" in [0-9]*) ;; *) continue ;; esac
-        delivery=$(awk -F= '$1=="delivery"{print $2; exit}' "$f")
-        [ "$delivery" = ack-required ] || continue
+        rec_delivery=$(awk -F= '$1=="delivery"{print $2; exit}' "$f")
+        [ "$rec_delivery" = ack-required ] || continue
         [ -e "$(inbox_escalated_dir "$root" "$slug")/$seq" ] && continue
         set -- $(inbox_ring_state_get "$root" "$slug" "$seq")
         count=${1:-0} epoch=${2:-0}
@@ -1026,16 +1046,23 @@ pending_recover() {
     root=$1 slug=$2 corr=$3
     f="$(pending_dir "$root" "$slug")/$corr"
     [ -f "$f" ] || return 0
-    summary=$(awk -F= '$1=="request_summary"{print $2; exit}' "$f")
-    id=$(rand_hex)
-    at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    body="Recovery request: no correlated reply arrived for your earlier steer. Please report back now with: ak done \"summary ... corr=$corr\" (original request: $summary)"
     lock_acquire "$root/.agent-kit/locks/crew-$slug.lock"
-    seq=$(inbox_write "$root" "$slug" "$id" "$at" ack-required "$body")
-    tmp="$f.tmp-$$"
-    awk -F= '$1!="phase" {print} END{print "phase=recovery-sent"}' "$f" >"$tmp"
-    mv "$tmp" "$f"
-    inbox_ring_initial "$root" "$slug" "$seq" || true
+    # Re-check under the lock so two concurrent sweeps cannot both send a
+    # recovery (the "exactly one recovery" guarantee).
+    phase=$(awk -F= '$1=="phase"{print $2; exit}' "$f")
+    if [ "$phase" != waiting ]; then
+        lock_release
+        return 0
+    fi
+    summary=$(awk -F= '$1=="request_summary"{print $2; exit}' "$f")
+    rec_id=$(rand_hex)
+    rec_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    rec_body="Recovery request: no correlated reply arrived for your earlier steer. Please report back now with: ak done \"summary ... corr=$corr\" (original request: $summary)"
+    rec_seq=$(inbox_write "$root" "$slug" "$rec_id" "$rec_at" ack-required "$rec_body")
+    rec_tmp="$f.tmp-$$"
+    awk -F= -v t="recovered_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" '$1!="phase" && $1!="recovered_at" {print} END{print "phase=recovery-sent"; print t}' "$f" >"$rec_tmp"
+    mv "$rec_tmp" "$f"
+    inbox_ring_initial "$root" "$slug" "$rec_seq" || true
     lock_release
     printf 'recovery request sent for crew %s (corr %s)\n' "$slug" "$corr"
 }
@@ -1043,13 +1070,21 @@ pending_recover() {
 # Escalate a pending expectation exactly once (durable keyed decision).
 pending_escalate() {
     root=$1 slug=$2 corr=$3
+    f="$(pending_dir "$root" "$slug")/$corr"
+    lock_acquire "$root/.agent-kit/locks/crew-$slug.lock"
+    # Re-check under the lock so a stale racer cannot escalate twice.
+    phase=$(awk -F= '$1=="phase"{print $2; exit}' "$f")
+    if [ "$phase" != recovery-sent ]; then
+        lock_release
+        return 0
+    fi
     d=$(pending_escalated_dir "$root" "$slug")
     mkdir -p "$d"
     printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$d/$corr"
-    f="$(pending_dir "$root" "$slug")/$corr"
     tmp="$f.tmp-$$"
     awk -F= '$1!="phase" {print} END{print "phase=escalated"}' "$f" >"$tmp"
     mv "$tmp" "$f"
+    lock_release
     backend_notify "$(primary_session 2>/dev/null || printf '%s' "${AK_HERDR_SESSION:-default}")" \
         "agent-kit escalation" "crew $slug: expected reply $corr escalated"
 }
@@ -1065,13 +1100,29 @@ pending_sweep() {
     status=
     [ -n "$pane" ] && [ -n "$session" ] && status=$(backend_agent_status "$session" "$pane")
     case "$status" in working | blocked) return 0 ;; esac
+    grace=${AK_INBOX_GRACE_SECS:-90}
+    now=$(date +%s)
     for f in "$d"/*; do
         [ -f "$f" ] || continue
         corr=$(basename "$f")
         phase=$(awk -F= '$1=="phase"{print $2; exit}' "$f")
         case "$phase" in
-        waiting) pending_recover "$root" "$slug" "$corr" ;;
-        recovery-sent) pending_escalate "$root" "$slug" "$corr" ;;
+        waiting)
+            created=$(awk -F= '$1=="created_at"{print $2; exit}' "$f")
+            e=$(iso_epoch "$created" 2>/dev/null || true)
+            if [ -n "$e" ] && [ $((now - e)) -lt "$grace" ]; then
+                continue
+            fi
+            pending_recover "$root" "$slug" "$corr"
+            ;;
+        recovery-sent)
+            recovered=$(awk -F= '$1=="recovered_at"{print $2; exit}' "$f")
+            e=$(iso_epoch "$recovered" 2>/dev/null || true)
+            if [ -n "$e" ] && [ $((now - e)) -lt "$grace" ]; then
+                continue
+            fi
+            pending_escalate "$root" "$slug" "$corr"
+            ;;
         esac
     done
 }
@@ -1082,7 +1133,7 @@ frame_message() {
     slug=$1
     shift
     text=$*
-    text=$(printf '%s' "$text" | tr '\t\n' ' ')
+    text=$(printf '%s' "$text" | tr '\t\n\r' ' ')
     printf '[crew %s] %s' "$slug" "$text"
 }
 
@@ -1855,6 +1906,12 @@ crew_send() {
     [ -n "$id" ] || id=$(rand_hex)
     at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     inbox=$(inbox_dir "$root" "$slug")
+    # Advance the re-ring ladder and pending-reply recovery for this crew
+    # before delivering, so unacked/uncorrelated outstanding messages make
+    # progress on every steer. This is the synchronous trigger that makes the
+    # bounded-retry guarantee operational (there is no background watcher).
+    inbox_sweep "$root" "$slug" || true
+    pending_sweep "$root" "$slug" || true
     corr=
     body=$msg
     if [ "$expect_reply" = 1 ]; then
@@ -1873,7 +1930,11 @@ corr=$corr"
         inbox_ring "$root" "$slug" "$(inbox_doorbell_line "$inbox")" >/dev/null 2>&1 || true
         exit 0
     fi
-    seq=$(inbox_write "$root" "$slug" "$id" "$at" "$delivery" "$body")
+    if ! seq=$(inbox_write "$root" "$slug" "$id" "$at" "$delivery" "$body"); then
+        lock_release
+        printf 'error: could not write inbox record for crew %s\n' "$slug" >&2
+        exit 1
+    fi
     if [ "$delivery" = ack-required ]; then
         inbox_ring_initial "$root" "$slug" "$seq" || true
     fi
@@ -1888,12 +1949,23 @@ corr=$corr"
 # Drive the re-ring ladder and pending-reply recovery for one crew. This is
 # the synchronous trigger for the bounded retry/ack machinery (no watcher).
 crew_sweep() {
-    [ "$#" -ge 1 ] || {
-        printf 'usage: ak crew-sweep <slug>\n' >&2
-        exit 2
-    }
-    slug=$(slugify "$1")
     root=$(repo_root)
+    if [ "$#" -eq 0 ]; then
+        base=$(crew_base)
+        [ -d "$base" ] || { printf 'no crews to sweep\n'; return 0; }
+        swept=0
+        for meta in "$base"/*/meta; do
+            [ -f "$meta" ] || continue
+            slug=$(awk -F= '$1=="slug" {print $2; exit}' "$meta")
+            [ -n "$slug" ] || continue
+            inbox_sweep "$root" "$slug"
+            pending_sweep "$root" "$slug"
+            swept=$((swept + 1))
+        done
+        printf 'crew swept: %s crew(s)\n' "$swept"
+        return 0
+    fi
+    slug=$(slugify "$1")
     meta=$(crew_meta_path "$slug")
     [ -f "$meta" ] || { printf 'unknown crew: %s\n' "$slug" >&2; exit 1; }
     inbox_sweep "$root" "$slug"
@@ -1933,6 +2005,10 @@ ak_ack() {
         [0-9]*) f="$inbox/$(printf '%03d' "$target").msg" ;;
         *) f="$inbox/$target.msg" ;;
         esac
+        if [ ! -f "$f" ] && [ -f "$inbox/handled/$(basename "$f")" ]; then
+            printf 'already acked: %s\n' "$(basename "$f" .msg)"
+            exit 0
+        fi
         [ -f "$f" ] || { printf 'no such inbox record: %s\n' "$target" >&2; exit 1; }
         inbox_ack_one "$root" "$slug" "$f"
     else
@@ -1953,7 +2029,17 @@ inbox_ack_one() {
     mkdir -p "$handled"
     seq=$(basename "$f" .msg)
     lock_acquire "$root/.agent-kit/locks/crew-$slug.lock"
-    mv "$f" "$handled/$seq.msg"
+    if [ ! -f "$f" ]; then
+        # Already moved by a concurrent ack (idempotent re-ack).
+        lock_release
+        printf 'already acked: %s\n' "$seq"
+        return 0
+    fi
+    mv "$f" "$handled/$seq.msg" || {
+        lock_release
+        printf 'ack failed for %s\n' "$seq" >&2
+        return 1
+    }
     inbox_ring_state_del "$root" "$slug" "$seq"
     lock_release
     printf 'acked: %s\n' "$seq"
@@ -2253,7 +2339,7 @@ chat_append() {
     msg=$*
     log=$(chat_path "$root" "$slug")
     mkdir -p "$(dirname "$log")" 2>/dev/null || return 0
-    msg=$(printf '%s' "$msg" | tr '\t\n' '  ')
+    msg=$(printf '%s' "$msg" | tr '\t\n\r' '  ')
     printf '%s\t%s\t%s\n' "$who" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$msg" >>"$log"
 }
 
