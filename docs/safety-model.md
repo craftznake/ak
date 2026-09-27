@@ -12,14 +12,14 @@ The repo uses a simple human-supervised crew model.
 - A crew can be closed only when its worktree is clean.
 - A crew should have a report before it is finished.
 - VCS-specific cleanup behavior is documented in `docs/vcs-workflow.md`.
-- A crew should push its completion note back to the primary with `ak crew-report`.
+- A crew should push its completion note back to the primary with `ak done`.
 
 ## Lifecycle
 
 1. Register the primary with `ak primary-set`.
 2. Spawn a crew with `ak crew-spawn`.
 3. Work in the isolated workspace.
-4. Push completion back with `ak crew-report`.
+4. Push completion back with `ak done`.
 5. Audit progress with `ak crew-audit`.
 6. Finish the crew with `ak crew-finish` once the worktree is clean.
 

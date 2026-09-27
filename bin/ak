@@ -27,13 +27,16 @@ Usage:
   ak crew-cost-prompt [message...]
   ak crew-peek <slug> [lines]
   ak crew-send <slug> <message text...>
+  ak crew-sweep <slug>
+  ak ack [<slug>] [<seq|path>]
   ak chat [<slug>] [lines]
-  ak crew-finish <slug> [report text...]
+  ak crew-finish [--abandon] <slug> [report text...]
   ak docs [list|show <name>]
 
 Worker commands (run from inside a crew worktree):
   ak reply <message text...>   message the primary mid-task and wake it
   ak done <message text...>    report completion and wake the primary
+  ak ack [<seq>]              acknowledge inbox messages (move to handled/)
 
 Roles:
   A session is a "worker" when this checkout has a worker role marker
@@ -59,6 +62,12 @@ Environment:
   AK_WAKE_ACCEPT_TIMEOUT max ms to wait for a woken agent to enter the working
                          state before a wake is reported unconfirmed
                          (default: 8000)
+  AK_INBOX_GRACE_SECS   seconds between re-ring attempts for an unacked
+                         ack-required inbox record (default: 90)
+  AK_INBOX_RING_MAX     max doorbell ring attempts before escalation
+                         (default: 3)
+  AK_DEBUG_WAKE         when set to a file path, append each framed primary
+                         wake line there (test/diagnostic hook)
   AK_NO_NOTIFY           disable backend notifications when set to 1
   AK_NO_WAKE             disable primary wakeup injection when set to 1
   AK_COST_CURRENCY       currency label for crew-cost (default: USD)
@@ -67,6 +76,22 @@ USAGE
 
 slugify() {
     printf '%s' "$*" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9][^a-z0-9]*/-/g; s/^-//; s/-$//' | cut -c1-60
+}
+
+# One-line crew purpose, derived from the brief's "# Objective" section first
+# line (or the first non-empty line), truncated to a sane width. Written into
+# meta as `title` for the live status panel; neutral fallback when absent.
+crew_title() {
+    text=$1
+    t=$(printf '%s\n' "$text" | awk '
+        /^#[[:space:]]*Objective[[:space:]]*$/ { seen=1; next }
+        seen && NF { sub(/^[[:space:]]*/, ""); print; exit }
+    ')
+    if [ -z "$t" ]; then
+        t=$(printf '%s\n' "$text" | sed -e 's/^#.*//' -e '/^[[:space:]]*$/d' | head -n 1 | sed 's/^[[:space:]]*//')
+    fi
+    [ -n "$t" ] || t='crew task'
+    printf '%s\n' "$t" | cut -c1-72
 }
 
 need() {
@@ -580,6 +605,7 @@ primary_set() {
     ensure_runtime_ignored
     mkdir -p "$(agentkit_dir)"
     cat >"$(primary_path)" <<EOF
+schema=ak-primary.v1
 session=$session
 target=$target
 agent=$agent
@@ -587,6 +613,7 @@ tab=${tab:-}
 workspace=${workspace:-}
 cwd=${cwd:-}
 inject=$inject
+session_id=$(rand_hex)
 registered_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
     printf 'primary target registered: %s\n' "$target"
@@ -671,15 +698,392 @@ crew_root() {
     repo_root
 }
 
+# --- delivery protocol ------------------------------------------------------
+# Durable steering inbox + doorbell + ack + bounded re-ring ladder + correlation
+# + authoritative lifecycle state machine. The on-disk files are the source of
+# truth; the terminal keystroke is a best-effort doorbell, never the record.
+# Formats follow docs/research-notes-go-port.md so bash `ak` and a future Go
+# binary read/write the same state. Full contract: docs/delivery-protocol.md.
+
+# Random 16-hex token (idempotency/correlation ids). Privacy-safe: not a path
+# or name, never wall-clock derived.
+rand_hex() {
+    if command -v openssl >/dev/null 2>&1 && h=$(openssl rand -hex 8 2>/dev/null) && [ -n "$h" ]; then
+        printf '%s\n' "$h"
+        return 0
+    fi
+    if [ -r /dev/urandom ]; then
+        od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' | cut -c1-16
+        return 0
+    fi
+    printf '%s%s' "$$" "$(date +%s)" | cksum | awk '{printf "%08x%08x", $1, $2}'
+}
+
+# --- authoritative lifecycle state ------------------------------------------
+crew_state_path() { printf '%s/.agent-kit/crew/%s/state' "$1" "$2"; }
+
+crew_state_get() {
+    f=$(crew_state_path "$1" "$2")
+    [ -f "$f" ] || { printf 'spawning\n'; return 0; }
+    v=$(awk -F= '$1=="state"{print $2; exit}' "$f")
+    printf '%s\n' "${v:-spawning}"
+}
+
+crew_state_valid_transition() {
+    from=$1 to=$2
+    case "$from" in
+    spawning) case "$to" in running | failed) return 0 ;; esac ;;
+    running) case "$to" in reported | failed) return 0 ;; esac ;;
+    reported) case "$to" in reported | done) return 0 ;; esac ;;
+    done) case "$to" in done) return 0 ;; esac ;;
+    failed) case "$to" in spawning | done) return 0 ;; esac ;;
+    esac
+    return 1
+}
+
+# Rewrite the state file for a transition, preserving all non-managed keys and
+# the one-time timestamps (started_at/reported_at/finished_at are set once).
+crew_state_write() {
+    root=$1 slug=$2 state=$3
+    f=$(crew_state_path "$root" "$slug")
+    mkdir -p "$(dirname "$f")"
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    ts_key=
+    case "$state" in
+    running) ts_key=started_at ;;
+    reported) ts_key=reported_at ;;
+    done) ts_key=finished_at ;;
+    esac
+    tmp="$f.tmp-$$"
+    {
+        printf 'schema=ak-crew-state.v1\n'
+        printf 'state=%s\n' "$state"
+        if [ -f "$f" ]; then
+            awk -F= -v k="$ts_key" '
+                $1!="schema" && $1!="state" && $1!="started_at" && $1!="reported_at" && $1!="finished_at" {print}
+                ($1=="started_at" || $1=="reported_at" || $1=="finished_at") && ($1 != k) {print}
+            ' "$f"
+        fi
+        if [ -n "$ts_key" ]; then printf '%s=%s\n' "$ts_key" "$now"; fi
+    } >"$tmp"
+    mv "$tmp" "$f"
+}
+
+# Compare-and-swap state transition under the per-crew lock. Illegal
+# transitions fail loudly instead of silently overwriting.
+crew_state_transition() {
+    root=$1 slug=$2 to=$3
+    lock_acquire "$root/.agent-kit/locks/crew-$slug.lock"
+    cur=$(crew_state_get "$root" "$slug")
+    if ! crew_state_valid_transition "$cur" "$to"; then
+        printf 'illegal crew state transition: %s -> %s (crew %s)\n' "$cur" "$to" "$slug" >&2
+        lock_release
+        return 1
+    fi
+    crew_state_write "$root" "$slug" "$to"
+    lock_release
+}
+
 # Record a durable "a wake could not be confirmed" marker in the crew state
-# file so the primary can discover it without watching stderr. On repeated
-# failures the latest timestamp is the last undelivered_at line.
+# file as a single authoritative value (last-wins, never duplicated).
 mark_wake_undelivered() {
     root=$1
     slug=$2
-    state="$root/.agent-kit/crew/$slug/state"
-    [ -d "$(dirname "$state")" ] || return 0
-    printf 'undelivered_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$state"
+    f=$(crew_state_path "$root" "$slug")
+    mkdir -p "$(dirname "$f")"
+    lock_acquire "$root/.agent-kit/locks/crew-$slug.lock"
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    tmp="$f.tmp-$$"
+    if [ -f "$f" ]; then
+        awk -F= '$1!="undelivered_at" {print}' "$f" >"$tmp"
+        printf 'undelivered_at=%s\n' "$now" >>"$tmp"
+    else
+        printf 'undelivered_at=%s\n' "$now" >"$tmp"
+    fi
+    mv "$tmp" "$f"
+    lock_release
+}
+
+# --- durable steering inbox -------------------------------------------------
+inbox_dir() { printf '%s/.agent-kit/crew/%s/inbox' "$1" "$2"; }
+inbox_handled_dir() { printf '%s/handled' "$(inbox_dir "$1" "$2")"; }
+inbox_ring_state_path() { printf '%s/.ring-state' "$(inbox_dir "$1" "$2")"; }
+inbox_escalated_dir() { printf '%s/.escalated' "$(inbox_dir "$1" "$2")"; }
+pending_dir() { printf '%s/.agent-kit/crew/%s/pending' "$1" "$2"; }
+pending_escalated_dir() { printf '%s/.agent-kit/crew/%s/escalated' "$1" "$2"; }
+
+# Next monotonic sequence, scanning BOTH inbox/ and inbox/handled/ so a number
+# is never reused. Caller must hold the per-crew lock.
+inbox_next_seq() {
+    inbox=$(inbox_dir "$1" "$2")
+    max=0
+    for f in "$inbox"/*.msg "$inbox"/handled/*.msg; do
+        [ -f "$f" ] || continue
+        base=$(basename "$f" .msg)
+        case "$base" in
+        [0-9]*) n=$((10#$base)); [ "$n" -gt "$max" ] && max=$n ;;
+        esac
+    done
+    printf '%d\n' $((max + 1))
+}
+
+# Write a durable inbox record atomically (temp + rename). Returns the sequence
+# on stdout. Body is written verbatim after the `--` delimiter line.
+inbox_write() {
+    root=$1 slug=$2 id=$3 at=$4 delivery=$5
+    shift 5
+    body=$*
+    inbox=$(inbox_dir "$root" "$slug")
+    mkdir -p "$inbox/handled"
+    seq=$(inbox_next_seq "$root" "$slug")
+    seqp=$(printf '%03d' "$seq")
+    file="$inbox/$seqp.msg"
+    tmp="$file.tmp-$$"
+    {
+        printf 'schema=ak-inbox.v1\n'
+        printf 'id=%s\n' "$id"
+        printf 'at=%s\n' "$at"
+        printf 'from=primary\n'
+        printf 'delivery=%s\n' "$delivery"
+        printf -- '--\n'
+        printf '%s\n' "$body"
+    } >"$tmp"
+    mv "$tmp" "$file"
+    printf '%s\n' "$seqp"
+}
+
+# Read the message body verbatim: skip to the `--` line, then print the rest.
+inbox_body() {
+    awk 'f{print} /^--$/{f=1}' "$1"
+}
+
+# Find an existing record by its idempotency id (across inbox + handled).
+inbox_find_by_id() {
+    root=$1 slug=$2 id=$3
+    inbox=$(inbox_dir "$root" "$slug")
+    for f in "$inbox"/*.msg "$inbox"/handled/*.msg; do
+        [ -f "$f" ] || continue
+        if grep -qxF "id=$id" "$f"; then printf '%s\n' "$f"; return 0; fi
+    done
+    return 1
+}
+
+# The constant, payload-free, inert doorbell line (leading `: ` is a POSIX
+# no-op, harmless if typed into a bare shell). Re-ringing it is free.
+inbox_doorbell_line() {
+    inbox=$1
+    printf ': agent-kit instruction waiting: list '"'"'%s'"'"'/*.msg, read and act on each in numeric order, then ack each handled file by moving it to '"'"'%s'"'"'/handled/ (the move IS the ack).\n' "$inbox" "$inbox"
+}
+
+# Probe liveness then ring the doorbell. Returns 0 if rung/attempted, 1 if the
+# target exists but the send failed, 3 if the target is positively dead/missing
+# (caller escalates directly without typing).
+inbox_ring() {
+    root=$1 slug=$2 line=$3
+    # Test seam: simulate a successful doorbell keystroke without a live agent.
+    if [ "${AK_INBOX_RING_OK:-0}" = 1 ]; then
+        [ -n "${AK_DEBUG_WAKE:-}" ] && { mkdir -p "$(dirname "$AK_DEBUG_WAKE")"; printf '%s\n' "$line" >>"$AK_DEBUG_WAKE"; }
+        return 0
+    fi
+    pane=$(crew_meta_field "$slug" herdr_pane 2>/dev/null || true)
+    session=$(crew_meta_field "$slug" herdr_session 2>/dev/null || true)
+    [ -n "$pane" ] && [ -n "$session" ] || return 1
+    status=$(backend_agent_status "$session" "$pane")
+    case "$status" in
+    idle | working | blocked | done)
+        [ -n "${AK_DEBUG_WAKE:-}" ] && { mkdir -p "$(dirname "$AK_DEBUG_WAKE")"; printf '%s\n' "$line" >>"$AK_DEBUG_WAKE"; }
+        backend_pane_send "$session" "$pane" "$line" >/dev/null 2>&1
+        return 0
+        ;;
+    agent_not_found)
+        return 3
+        ;;
+    *)
+        [ -n "${AK_DEBUG_WAKE:-}" ] && { mkdir -p "$(dirname "$AK_DEBUG_WAKE")"; printf '%s\n' "$line" >>"$AK_DEBUG_WAKE"; }
+        backend_pane_send "$session" "$pane" "$line" >/dev/null 2>&1 || return 1
+        return 0
+        ;;
+    esac
+}
+
+# --- ring-state (re-ring ladder bookkeeping; must be called under the lock) -
+inbox_ring_state_get() {
+    f=$(inbox_ring_state_path "$1" "$2")
+    [ -f "$f" ] || return 1
+    awk -F'\t' -v s="$3" '$1==s{print $2, $3; exit}' "$f"
+}
+
+inbox_ring_state_set() {
+    f=$(inbox_ring_state_path "$1" "$2")
+    mkdir -p "$(dirname "$f")"
+    tmp="$f.tmp-$$"
+    if [ -f "$f" ]; then awk -F'\t' -v s="$3" '$1!=s' "$f" >"$tmp"; else : >"$tmp"; fi
+    printf '%s\t%s\t%s\n' "$3" "$4" "$5" >>"$tmp"
+    mv "$tmp" "$f"
+}
+
+inbox_ring_state_del() {
+    f=$(inbox_ring_state_path "$1" "$2")
+    [ -f "$f" ] || return 0
+    tmp="$f.tmp-$$"
+    awk -F'\t' -v s="$3" '$1!=s' "$f" >"$tmp"
+    if [ -s "$tmp" ]; then mv "$tmp" "$f"; else rm -f "$tmp" "$f"; fi
+}
+
+# Durable escalation marker (ladder). After max ring attempts, stop ringing.
+inbox_escalate() {
+    root=$1 slug=$2 seq=$3
+    d=$(inbox_escalated_dir "$root" "$slug")
+    mkdir -p "$d"
+    printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$d/$seq"
+    inbox_ring_state_del "$root" "$slug" "$seq"
+    backend_notify "$(primary_session 2>/dev/null || printf '%s' "${AK_HERDR_SESSION:-default}")" \
+        "agent-kit escalation" "crew $slug: unacked message $seq escalated after max ring attempts"
+}
+
+# Ring + record the initial attempt (count=1) for a fresh ack-required record.
+inbox_ring_initial() {
+    root=$1 slug=$2 seq=$3
+    inbox=$(inbox_dir "$root" "$slug")
+    line=$(inbox_doorbell_line "$inbox")
+    if inbox_ring "$root" "$slug" "$line"; then
+        inbox_ring_state_set "$root" "$slug" "$seq" 1 "$(date +%s)"
+        return 0
+    else
+        rc=$?
+        [ "$rc" = 3 ] && inbox_escalate "$root" "$slug" "$seq"
+        return 1
+    fi
+}
+
+# The bounded re-ring ladder: one ring attempt per grace period per unacked
+# ack-required record, up to AK_INBOX_RING_MAX, then escalate and stop.
+inbox_sweep() {
+    root=$1 slug=$2
+    inbox=$(inbox_dir "$root" "$slug")
+    [ -d "$inbox" ] || return 0
+    grace=${AK_INBOX_GRACE_SECS:-90}
+    max=${AK_INBOX_RING_MAX:-3}
+    now=$(date +%s)
+    line=$(inbox_doorbell_line "$inbox")
+    lock_acquire "$root/.agent-kit/locks/crew-$slug.lock"
+    for f in "$inbox"/*.msg; do
+        [ -f "$f" ] || continue
+        seq=$(basename "$f" .msg)
+        case "$seq" in [0-9]*) ;; *) continue ;; esac
+        delivery=$(awk -F= '$1=="delivery"{print $2; exit}' "$f")
+        [ "$delivery" = ack-required ] || continue
+        [ -e "$(inbox_escalated_dir "$root" "$slug")/$seq" ] && continue
+        set -- $(inbox_ring_state_get "$root" "$slug" "$seq")
+        count=${1:-0} epoch=${2:-0}
+        if [ "$count" -ge "$max" ]; then
+            inbox_escalate "$root" "$slug" "$seq"
+            continue
+        fi
+        if [ "$epoch" -gt 0 ] && [ $((now - epoch)) -ge "$grace" ]; then
+            if inbox_ring "$root" "$slug" "$line"; then
+                inbox_ring_state_set "$root" "$slug" "$seq" $((count + 1)) "$now"
+            else
+                rc=$?
+                [ "$rc" = 3 ] && inbox_escalate "$root" "$slug" "$seq"
+            fi
+        fi
+    done
+    lock_release
+}
+
+# --- correlation / pending-reply expectation --------------------------------
+pending_create() {
+    root=$1 slug=$2 corr=$3 summary=$4
+    d=$(pending_dir "$root" "$slug")
+    mkdir -p "$d"
+    f="$d/$corr"
+    tmp="$f.tmp-$$"
+    {
+        printf 'schema=ak-pending-reply.v1\n'
+        printf 'corr=%s\n' "$corr"
+        printf 'slug=%s\n' "$slug"
+        printf 'request_summary=%s\n' "$(printf '%s' "$summary" | tr '\t\n' '  ')"
+        printf 'created_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'phase=waiting\n'
+    } >"$tmp"
+    mv "$tmp" "$f"
+}
+
+pending_resolve() {
+    root=$1 slug=$2 corr=$3 by=$4
+    f="$(pending_dir "$root" "$slug")/$corr"
+    [ -f "$f" ] || return 0
+    tmp="$f.tmp-$$"
+    awk -F= -v p='phase=resolved' -v r="resolved_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -v b="resolved_by=$by" \
+        '$1!="phase" && $1!="resolved_at" && $1!="resolved_by" {print} END{print p; print r; print b}' "$f" >"$tmp"
+    mv "$tmp" "$f"
+    rm -f "$(pending_escalated_dir "$root" "$slug")/$corr" 2>/dev/null || true
+}
+
+# Send exactly one automatic recovery request for a pending expectation.
+pending_recover() {
+    root=$1 slug=$2 corr=$3
+    f="$(pending_dir "$root" "$slug")/$corr"
+    [ -f "$f" ] || return 0
+    summary=$(awk -F= '$1=="request_summary"{print $2; exit}' "$f")
+    id=$(rand_hex)
+    at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    body="Recovery request: no correlated reply arrived for your earlier steer. Please report back now with: ak done \"summary ... corr=$corr\" (original request: $summary)"
+    lock_acquire "$root/.agent-kit/locks/crew-$slug.lock"
+    seq=$(inbox_write "$root" "$slug" "$id" "$at" ack-required "$body")
+    tmp="$f.tmp-$$"
+    awk -F= '$1!="phase" {print} END{print "phase=recovery-sent"}' "$f" >"$tmp"
+    mv "$tmp" "$f"
+    inbox_ring_initial "$root" "$slug" "$seq" || true
+    lock_release
+    printf 'recovery request sent for crew %s (corr %s)\n' "$slug" "$corr"
+}
+
+# Escalate a pending expectation exactly once (durable keyed decision).
+pending_escalate() {
+    root=$1 slug=$2 corr=$3
+    d=$(pending_escalated_dir "$root" "$slug")
+    mkdir -p "$d"
+    printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$d/$corr"
+    f="$(pending_dir "$root" "$slug")/$corr"
+    tmp="$f.tmp-$$"
+    awk -F= '$1!="phase" {print} END{print "phase=escalated"}' "$f" >"$tmp"
+    mv "$tmp" "$f"
+    backend_notify "$(primary_session 2>/dev/null || printf '%s' "${AK_HERDR_SESSION:-default}")" \
+        "agent-kit escalation" "crew $slug: expected reply $corr escalated"
+}
+
+# Drive the pending-reply bound: waiting -> recovery-sent (one recovery), then
+# recovery-sent -> escalated (one escalation), then stop. Never loops.
+pending_sweep() {
+    root=$1 slug=$2
+    d=$(pending_dir "$root" "$slug")
+    [ -d "$d" ] || return 0
+    pane=$(crew_meta_field "$slug" herdr_pane 2>/dev/null || true)
+    session=$(crew_meta_field "$slug" herdr_session 2>/dev/null || true)
+    status=
+    [ -n "$pane" ] && [ -n "$session" ] && status=$(backend_agent_status "$session" "$pane")
+    case "$status" in working | blocked) return 0 ;; esac
+    for f in "$d"/*; do
+        [ -f "$f" ] || continue
+        corr=$(basename "$f")
+        phase=$(awk -F= '$1=="phase"{print $2; exit}' "$f")
+        case "$phase" in
+        waiting) pending_recover "$root" "$slug" "$corr" ;;
+        recovery-sent) pending_escalate "$root" "$slug" "$corr" ;;
+        esac
+    done
+}
+
+# Frame a primary-bound wake as a single flattened line with an explicit
+# [crew <slug>] prefix, so worker text can never masquerade as a user turn.
+frame_message() {
+    slug=$1
+    shift
+    text=$*
+    text=$(printf '%s' "$text" | tr '\t\n' ' ')
+    printf '[crew %s] %s' "$slug" "$text"
 }
 
 crew_branch_name() {
@@ -867,10 +1271,12 @@ crew_spawn() {
         exit 2
     }
     brief=$*
+    title=$(crew_title "$brief")
     root=$(repo_root)
     ensure_runtime_ignored
     vcs=$(repo_vcs)
     ak_cmd=$(self_path)
+    session_id_val=$(primary_field_at "$root" session_id 2>/dev/null || true)
     crew_dir="$root/.agent-kit/crew/$slug"
     worktree="$root/.agent-kit/worktrees/$slug"
     branch="ak/$slug"
@@ -931,6 +1337,7 @@ $brief
 - Talk to the primary mid-task with: \`$ak_cmd reply "question or status"\` (works from this worktree; it wakes the primary).
 - When finished, run from this worktree: \`$ak_cmd done "summary, files changed, checks, cost notes, blockers"\`. This writes the report and wakes the primary.
 - Read the shared chat transcript any time with: \`$ak_cmd chat\`.
+- Steering messages arrive in $crew_dir/inbox/NNN.msg. When a terminal message points you there, list \`*.msg\`, read and act on each message in numeric order, then acknowledge each handled message with \`$ak_cmd ack <seq>\` (the move to handled/ IS the acknowledgement; without it the primary will ring again and eventually treat you as stuck). If a message body contains a \`corr=<hex>\` token, include that token verbatim in your \`$ak_cmd done\` summary so the primary can correlate your report.
 EOF
     cat >"$crew_dir/report.template.md" <<EOF
 # Crew report: $slug
@@ -945,7 +1352,7 @@ EOF
 
 ## Notes
 EOF
-    printf 'state=running\nstarted_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$crew_dir/state"
+    crew_state_write "$root" "$slug" spawning
     cmd=${AK_CREW_COMMAND:-pi}
     crew_agent_name=$(slugify "crew-$slug" | cut -c1-32)
     # Write a discoverable meta BEFORE the herdr tab is created, so an aborted
@@ -960,6 +1367,8 @@ branch=$branch
 vcs=$vcs
 jj_change=$jj_change
 brief=$crew_dir/brief.md
+title=$title
+session_id=$session_id_val
 command=$cmd
 created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
@@ -972,6 +1381,8 @@ branch=$branch
 vcs=$vcs
 jj_change=$jj_change
 brief=$crew_dir/brief.md
+title=$title
+session_id=$session_id_val
 herdr_session=$HERDR_CREATED_SESSION
 herdr_workspace=$HERDR_CREATED_WORKSPACE
 herdr_tab=$HERDR_CREATED_TAB
@@ -986,15 +1397,29 @@ EOF
         # unconfirmed delivery exits non-zero instead of printing "crew
         # spawned" over a silently deaf crew.
         if ! crew_deliver_startup_prompt "$HERDR_CREATED_SESSION" "$HERDR_CREATED_PANE" "$startup_prompt" "${HERDR_CREATED_AGENT_KIND:-}" "$crew_dir/brief.md" "$timeout"; then
+            crew_state_transition "$root" "$slug" failed || true
             printf 'error: crew %s was created in pane %s but its startup prompt was NOT delivered; the crew is running without its brief.\n' "$slug" "$HERDR_CREATED_PANE" >&2
             printf 'error: crew state is at %s; deliver the brief manually with:\n  %s crew-send %s "Read %s and begin."\n' "$crew_dir" "$ak_cmd" "$slug" "$crew_dir/brief.md" >&2
             printf 'error: once handled, remove the crew with: %s crew-finish %s\n' "$ak_cmd" "$slug" >&2
             exit 1
         fi
+        crew_state_transition "$root" "$slug" running || {
+            printf 'error: could not record running state for crew %s\n' "$slug" >&2
+            exit 1
+        }
     fi
     printf 'crew spawned: %s\n' "$slug"
     printf 'worktree: %s\n' "$worktree"
     printf 'brief: %s\n' "$crew_dir/brief.md"
+}
+
+iso_epoch() {
+    ts=$1
+    if [ "$(uname -s)" = Darwin ]; then
+        date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$ts" '+%s' 2>/dev/null
+    else
+        date -u -d "$ts" '+%s' 2>/dev/null
+    fi
 }
 
 crew_status() {
@@ -1003,7 +1428,8 @@ crew_status() {
         printf 'no crew state\n'
         return 0
     }
-    printf 'slug\tstate\tworktree\tbranch\treport\n'
+    root=$(repo_root)
+    printf 'slug\tstate\tlive\tworktree\tbranch\treport\n'
     for meta in "$base"/*/meta; do
         [ -f "$meta" ] || continue
         slug=$(awk -F= '$1=="slug" {print $2}' "$meta")
@@ -1012,8 +1438,11 @@ crew_status() {
         worktree=$(awk -F= '$1=="worktree" {print $2}' "$meta")
         branch=$(awk -F= '$1=="branch" {print $2}' "$meta")
         report=$(crew_report_path "$slug")
-        state=$(backend_agent_status "$session" "$pane")
-        [ -n "$state" ] || state=unknown
+        # Authoritative lifecycle state (the source of truth), with the live
+        # agent probe shown separately and clearly labelled.
+        state=$(crew_state_get "$root" "$slug")
+        live=$(backend_agent_status "$session" "$pane")
+        [ -n "$live" ] || live=unknown
         if [ -n "$worktree" ] && [ -d "$worktree" ]; then
             if crew_worktree_clean "$worktree"; then
                 cleanliness=clean
@@ -1028,7 +1457,7 @@ crew_status() {
         else
             report_state=no
         fi
-        printf '%s\t%s/%s\t%s\t%s\t%s\n' "$slug" "$state" "$cleanliness" "$worktree" "$branch" "$report_state"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$slug" "$state" "$live" "$worktree" "$branch" "$report_state"
     done
 }
 
@@ -1038,6 +1467,7 @@ crew_audit() {
         printf 'no crew state\n'
         return 0
     }
+    root=$(repo_root)
     for meta in "$base"/*/meta; do
         [ -f "$meta" ] || continue
         slug=$(awk -F= '$1=="slug" {print $2}' "$meta")
@@ -1046,8 +1476,9 @@ crew_audit() {
         worktree=$(awk -F= '$1=="worktree" {print $2}' "$meta")
         branch=$(awk -F= '$1=="branch" {print $2}' "$meta")
         report=$(crew_report_path "$slug")
-        state=$(backend_agent_status "$session" "$pane")
-        [ -n "$state" ] || state=unknown
+        state=$(crew_state_get "$root" "$slug")
+        live=$(backend_agent_status "$session" "$pane")
+        [ -n "$live" ] || live=unknown
         if [ -n "$worktree" ] && [ -d "$worktree" ]; then
             if crew_worktree_clean "$worktree"; then
                 cleanliness=clean
@@ -1062,9 +1493,29 @@ crew_audit() {
         else
             report_state=missing
         fi
-        printf '%s\n' "- $slug: state=$state, worktree=$cleanliness, branch=$branch, report=$report_state"
+        printf '%s\n' "- $slug: state=$state, live=$live, worktree=$cleanliness, branch=$branch, report=$report_state"
         if [ "$cleanliness" = dirty ]; then
             printf '  worktree: %s\n' "$worktree"
+        fi
+        # Delivery observability: unacked inbox records, their age, and the
+        # current ring-attempt count, so a stuck crew is visible without
+        # reading raw files.
+        inbox=$(inbox_dir "$root" "$slug")
+        if [ -d "$inbox" ]; then
+            pending=0
+            for f in "$inbox"/*.msg; do
+                [ -f "$f" ] || continue
+                pending=$((pending + 1))
+                seq=$(basename "$f" .msg)
+                at=$(awk -F= '$1=="at"{print $2; exit}' "$f")
+                set -- $(inbox_ring_state_get "$root" "$slug" "$seq")
+                attempts=${1:-0}
+                e=$(iso_epoch "$at" || true)
+                if [ -n "$e" ]; then age=$(( $(date +%s) - e )); else age=unknown; fi
+                printf '  inbox %s: age=%ss attempts=%s\n' "$seq" "$age" "$attempts"
+            done
+            esc=$(ls "$(inbox_escalated_dir "$root" "$slug")" 2>/dev/null | wc -l | tr -d ' ')
+            [ "$esc" = 0 ] || printf '  escalated: %s unacked record(s)\n' "$esc"
         fi
     done
 }
@@ -1175,16 +1626,36 @@ crew_cost_prompt() {
     printf 'cost prompts sent: %s\n' "$sent"
 }
 
+crew_note() {
+    root=$1 slug=$2
+    shift 2
+    msg=$*
+    notes="$root/.agent-kit/crew/$slug/notes.md"
+    mkdir -p "$(dirname "$notes")"
+    printf -- '- %s: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(printf '%s' "$msg" | tr '\t\n' '  ')" >>"$notes"
+    chat_append "$root" "$slug" worker "note: $msg"
+    printf 'note recorded for crew %s (state unchanged)\n' "$slug"
+}
+
 crew_report() {
+    note=0
+    if [ "${1:-}" = "--note" ]; then
+        note=1
+        shift
+    fi
     [ "$#" -ge 2 ] || {
-        printf 'usage: ak crew-report <slug> <message text...>\n' >&2
+        printf 'usage: ak crew-report [--note] <slug> <message text...>\n' >&2
         exit 2
     }
     slug=$(slugify "$1")
     shift
     root=$(crew_root)
-    chat_append "$root" "$slug" worker "report: $*"
-    crew_report_core "$root" "$slug" "$*"
+    if [ "$note" = 1 ]; then
+        crew_note "$root" "$slug" "$*"
+    else
+        chat_append "$root" "$slug" worker "report: $*"
+        crew_report_core "$root" "$slug" "$*"
+    fi
 }
 
 crew_resume() {
@@ -1202,8 +1673,13 @@ crew_resume() {
 }
 
 crew_finish() {
+    abandon=0
+    if [ "${1:-}" = "--abandon" ]; then
+        abandon=1
+        shift
+    fi
     [ "$#" -ge 1 ] || {
-        printf 'usage: ak crew-finish <slug> [report text...]\n' >&2
+        printf 'usage: ak crew-finish [--abandon] <slug> [report text...]\n' >&2
         exit 2
     }
     slug=$(slugify "$1")
@@ -1221,6 +1697,23 @@ crew_finish() {
     tab=$(crew_field "$slug" herdr_tab)
     session=$(crew_field "$slug" herdr_session)
     report=$(crew_report_path "$slug")
+    # Per-crew lock serializes finish against a concurrent ak done / crew-report,
+    # so finish can never tear down a worktree while a report is in flight.
+    lock_acquire "$root/.agent-kit/locks/crew-$slug.lock"
+    state=$(crew_state_get "$root" "$slug")
+    case "$state" in
+    reported | done) : ;;
+    failed)
+        if [ "$abandon" != 1 ]; then
+            printf 'crew %s is in failed state; finish requires --abandon\n' "$slug" >&2
+            exit 1
+        fi
+        ;;
+    *)
+        printf 'crew %s is in state %s; a report (ak done / crew-report) is required before finish\n' "$slug" "$state" >&2
+        exit 1
+        ;;
+    esac
     if [ "$#" -gt 0 ]; then
         mkdir -p "$(dirname "$report")"
         cat >"$report" <<EOF
@@ -1233,12 +1726,21 @@ EOF
         printf 'write one with: %s crew-report %s "summary..."\n' "$ak_cmd" "$slug" >&2
         exit 1
     fi
-    if ! crew_worktree_clean "$worktree"; then
-        printf 'crew worktree is dirty; review before finishing: %s\n' "$worktree" >&2
-        if [ "$vcs" = jj ]; then
-            jj -R "$worktree" status --no-pager >&2 || true
+    if crew_worktree_clean "$worktree"; then
+        rc=0
+    else
+        rc=$?
+    fi
+    if [ "$rc" != 0 ]; then
+        if [ "$rc" = 2 ]; then
+            printf 'crew worktree is missing (not dirty): %s\n' "$worktree" >&2
         else
-            git -C "$worktree" status --short >&2 || true
+            printf 'crew worktree is dirty; review before finishing: %s\n' "$worktree" >&2
+            if [ "$vcs" = jj ]; then
+                jj -R "$worktree" status --no-pager >&2 || true
+            else
+                git -C "$worktree" status --short >&2 || true
+            fi
         fi
         exit 1
     fi
@@ -1301,7 +1803,8 @@ EOF
             fi
         fi
     fi
-    printf 'state=done\nfinished_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$(dirname "$meta")/state"
+    crew_state_write "$root" "$slug" done
+    lock_release
     printf 'crew finished: %s\n' "$slug"
     printf 'report: %s\n' "$report"
 }
@@ -1323,16 +1826,137 @@ crew_peek() {
 }
 
 crew_send() {
+    id=
+    delivery=ack-required
+    expect_reply=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+        --id) [ "$#" -ge 2 ] || { printf 'usage: --id <id>\n' >&2; exit 2; }; id=$2; shift 2 ;;
+        --fire-and-forget) delivery=fire-and-forget; shift ;;
+        --expect-reply) expect_reply=1; shift ;;
+        --*) printf 'unknown option: %s\n' "$1" >&2; exit 2 ;;
+        *) break ;;
+        esac
+    done
     [ "$#" -ge 2 ] || {
-        printf 'usage: ak crew-send <slug> <message text...>\n' >&2
+        printf 'usage: ak crew-send [--id <id>] [--fire-and-forget] [--expect-reply] <slug> <message text...>\n' >&2
         exit 2
     }
     slug=$(slugify "$1")
     shift
-    pane=$(crew_meta_field "$slug" herdr_pane)
-    session=$(crew_meta_field "$slug" herdr_session)
-    chat_append "$(repo_root)" "$slug" primary "$*"
-    backend_pane_send "$session" "$pane" "$*"
+    root=$(repo_root)
+    meta=$(crew_meta_path "$slug")
+    [ -f "$meta" ] || { printf 'unknown crew: %s\n' "$slug" >&2; exit 1; }
+    msg=$*
+    if [ "$expect_reply" = 1 ] && [ "$delivery" = fire-and-forget ]; then
+        printf 'error: --expect-reply requires ack-required delivery (drop --fire-and-forget)\n' >&2
+        exit 2
+    fi
+    [ -n "$id" ] || id=$(rand_hex)
+    at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    inbox=$(inbox_dir "$root" "$slug")
+    corr=
+    body=$msg
+    if [ "$expect_reply" = 1 ]; then
+        corr=$(rand_hex)
+        pending_create "$root" "$slug" "$corr" "$msg"
+        body="$msg
+corr=$corr"
+    fi
+    lock_acquire "$root/.agent-kit/locks/crew-$slug.lock"
+    # Idempotency: the same delivery id never creates a duplicate record. The
+    # re-check happens under the lock so two concurrent same-id sends cannot
+    # both pass the pre-lock scan and both write.
+    if existing=$(inbox_find_by_id "$root" "$slug" "$id"); then
+        lock_release
+        printf 'already delivered (id=%s): %s\n' "$id" "$existing"
+        inbox_ring "$root" "$slug" "$(inbox_doorbell_line "$inbox")" >/dev/null 2>&1 || true
+        exit 0
+    fi
+    seq=$(inbox_write "$root" "$slug" "$id" "$at" "$delivery" "$body")
+    if [ "$delivery" = ack-required ]; then
+        inbox_ring_initial "$root" "$slug" "$seq" || true
+    fi
+    lock_release
+    chat_append "$root" "$slug" primary "$msg"
+    printf 'sent to crew %s: inbox seq %s (%s)\n' "$slug" "$seq" "$delivery"
+    if [ "$expect_reply" = 1 ]; then
+        printf 'pending reply armed: corr=%s\n' "$corr"
+    fi
+}
+
+# Drive the re-ring ladder and pending-reply recovery for one crew. This is
+# the synchronous trigger for the bounded retry/ack machinery (no watcher).
+crew_sweep() {
+    [ "$#" -ge 1 ] || {
+        printf 'usage: ak crew-sweep <slug>\n' >&2
+        exit 2
+    }
+    slug=$(slugify "$1")
+    root=$(repo_root)
+    meta=$(crew_meta_path "$slug")
+    [ -f "$meta" ] || { printf 'unknown crew: %s\n' "$slug" >&2; exit 1; }
+    inbox_sweep "$root" "$slug"
+    pending_sweep "$root" "$slug"
+    printf 'crew swept: %s\n' "$slug"
+}
+
+# The worker-side acknowledgement: move an inbox record to handled/. The move
+# IS the acknowledgement. Worktree-safe like `ak done`/`ak reply`.
+ak_ack() {
+    slug=
+    target=
+    if is_worker; then
+        marker=$(role_marker_path)
+        slug=$(role_field "$marker" slug)
+    fi
+    if [ "$#" -ge 1 ]; then
+        arg=$1
+        shift
+        if [ -n "$slug" ]; then
+            target=$arg
+        else
+            slug=$(slugify "$arg")
+            target=${1:-}
+        fi
+    fi
+    [ -n "$slug" ] || {
+        printf 'usage: ak ack [<slug>] [<seq|path>]\n' >&2
+        exit 2
+    }
+    root=$(crew_root)
+    inbox=$(inbox_dir "$root" "$slug")
+    [ -d "$inbox" ] || { printf 'no inbox for crew: %s\n' "$slug" >&2; exit 1; }
+    if [ -n "$target" ]; then
+        case "$target" in
+        *.msg) f=$target ;;
+        [0-9]*) f="$inbox/$(printf '%03d' "$target").msg" ;;
+        *) f="$inbox/$target.msg" ;;
+        esac
+        [ -f "$f" ] || { printf 'no such inbox record: %s\n' "$target" >&2; exit 1; }
+        inbox_ack_one "$root" "$slug" "$f"
+    else
+        found=0
+        for f in "$inbox"/*.msg; do
+            [ -f "$f" ] || continue
+            case "$(basename "$f" .msg)" in [0-9]*) ;; *) continue ;; esac
+            inbox_ack_one "$root" "$slug" "$f"
+            found=1
+        done
+        [ "$found" = 1 ] || printf 'no pending messages for crew %s\n' "$slug"
+    fi
+}
+
+inbox_ack_one() {
+    root=$1 slug=$2 f=$3
+    handled=$(inbox_handled_dir "$root" "$slug")
+    mkdir -p "$handled"
+    seq=$(basename "$f" .msg)
+    lock_acquire "$root/.agent-kit/locks/crew-$slug.lock"
+    mv "$f" "$handled/$seq.msg"
+    inbox_ring_state_del "$root" "$slug" "$seq"
+    lock_release
+    printf 'acked: %s\n' "$seq"
 }
 
 # --- backend seam -----------------------------------------------------------
@@ -1677,10 +2301,15 @@ ak_reply() {
     ptarget=$(role_field "$marker" primary_target)
     msg=$*
     chat_append "$proot" "$slug" worker "$msg"
+    framed=$(frame_message "$slug" "$msg")
+    if [ -n "${AK_DEBUG_WAKE:-}" ]; then
+        mkdir -p "$(dirname "$AK_DEBUG_WAKE")"
+        printf '%s\n' "$framed" >>"$AK_DEBUG_WAKE"
+    fi
     if [ "${AK_NO_WAKE:-0}" = 1 ]; then
         printf 'replied (logged to chat); wake disabled via AK_NO_WAKE\n'
     elif [ -n "$ptarget" ]; then
-        if backend_wake "$psession" "$ptarget" "crew $slug: $msg"; then
+        if backend_wake "$psession" "$ptarget" "$framed"; then
             printf 'replied to primary and sent wake: %s\n' "$slug"
         else
             rc=$?
@@ -1735,28 +2364,59 @@ crew_report_core() {
         printf 'unknown crew: %s\n' "$slug" >&2
         exit 1
     }
+    # Authoritative state machine: a report requires the crew to be running
+    # (or already reported). Finished/failed crews cannot be re-reported.
+    state=$(crew_state_get "$root" "$slug")
+    case "$state" in
+    done)
+        printf 'error: crew %s is already finished; report rejected\n' "$slug" >&2
+        exit 1
+        ;;
+    failed)
+        printf 'error: crew %s is in failed state; re-brief or abandon before reporting\n' "$slug" >&2
+        exit 1
+        ;;
+    spawning)
+        crew_state_transition "$root" "$slug" running || exit 1
+        ;;
+    esac
     report="$crewdir/report.md"
+    report_id=$(rand_hex)
+    reported_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     mkdir -p "$crewdir"
     {
+        printf '<!-- schema=ak-report.v1 -->\n'
+        printf '<!-- id=%s -->\n\n' "$report_id"
         printf '# Crew report: %s\n\n' "$slug"
         printf '## Outcome\n\n%s\n\n' "$message"
         printf '## Files changed\n\n- see worktree\n\n'
         printf '## Checks\n\n- pending or included above\n\n'
         printf '## Cost\n\n- see cost.tsv or included above\n\n'
-        printf '## Notes\n\n- reported_at: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf '## Notes\n\n- reported_at: %s\n' "$reported_at"
     } >"$report"
-    reported_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    printf 'state=reported\nreported_at=%s\n' "$reported_at" >"$crewdir/state"
+    # Terminal transition to reported (idempotent for repeated reports).
+    crew_state_transition "$root" "$slug" reported || exit 1
     inbox="$root/.agent-kit/inbox"
     mkdir -p "$inbox"
-    printf '# Crew update: %s\n\n- reported_at: %s\n- report: %s\n\n%s\n' "$slug" "$reported_at" "$report" "$message" >"$inbox/${reported_at}-$slug.md"
+    printf '# Crew update: %s\n\n- id: %s\n- reported_at: %s\n- report: %s\n\n%s\n' "$slug" "$report_id" "$reported_at" "$report" "$message" >"$inbox/${reported_at}-${report_id}-$slug.md"
+    # Resolve any pending reply correlated to this report (the worker echoes the
+    # corr token from the steered message back in the done/report summary).
+    corr=$(printf '%s\n' "$message" | sed -n 's/.*corr=\([0-9a-fA-F][0-9a-fA-F]*\).*/\1/p' | head -n 1)
+    if [ -n "$corr" ]; then
+        pending_resolve "$root" "$slug" "$corr" "$report_id"
+    fi
     session=$(primary_field_at "$root" session 2>/dev/null || printf '%s' "${AK_HERDR_SESSION:-default}")
     inject=$(primary_field_at "$root" inject 2>/dev/null || printf 1)
     target=$(primary_field_at "$root" target 2>/dev/null || true)
-    backend_notify "$session" "agent-kit crew update" "crew $slug: $message"
+    framed=$(frame_message "$slug" "$message")
+    if [ -n "${AK_DEBUG_WAKE:-}" ]; then
+        mkdir -p "$(dirname "$AK_DEBUG_WAKE")"
+        printf '%s\n' "$framed" >>"$AK_DEBUG_WAKE"
+    fi
+    backend_notify "$session" "agent-kit crew update" "$framed"
     wake_rc=0
     if [ "${AK_NO_WAKE:-0}" != 1 ] && [ "${inject:-1}" = 1 ] && [ -n "$target" ]; then
-        if backend_wake "$session" "$target" "crew $slug: $message"; then
+        if backend_wake "$session" "$target" "$framed"; then
             :
         else
             wake_rc=$?
@@ -1866,6 +2526,14 @@ crew-peek)
 crew-send)
     shift
     crew_send "$@"
+    ;;
+crew-sweep)
+    shift
+    crew_sweep "$@"
+    ;;
+ack)
+    shift
+    ak_ack "$@"
     ;;
 crew-finish)
     shift

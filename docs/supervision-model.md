@@ -16,11 +16,12 @@ The primary agent supervises crews instead of babysitting every terminal manuall
 - `ak crew-cost-summary` - summarize logged spend across crews.
 - `ak crew-cost-prompt [message...]` - proactively ask all active crews to log current spend.
 - `ak crew-peek <slug>` - inspect a crew's visible Herdr output.
-- `ak crew-send <slug> <message>` - nudge a crew directly (also logged to the shared chat).
+- `ak crew-send <slug> <message>` - deliver a durable steering message to a crew (rings its doorbell).
+- `ak crew-sweep <slug>` - run the re-ring ladder and pending-reply recovery for a crew.
 - `ak chat <slug> [lines]` - read the primary/worker chat transcript for a crew.
-- `ak crew-finish <slug>` - close a clean crew and remove its isolated worktree.
+- `ak crew-finish [--abandon] <slug>` - close a reported crew and remove its isolated worktree.
 
-Worker-side (run from inside a crew worktree): `ak reply <message>` messages the primary mid-task and wakes it; `ak done <message>` reports completion and wakes the primary.
+Worker-side (run from inside a crew worktree): `ak reply <message>` messages the primary mid-task and wakes it; `ak done <message>` reports completion and wakes the primary; `ak ack [<seq>]` acknowledges a steering message by moving it to `handled/`.
 
 ## Recommended loop
 
@@ -31,8 +32,8 @@ Worker-side (run from inside a crew worktree): `ak reply <message>` messages the
 - have the crew hand back with `ak done` from its worktree (or `ak crew-report <slug>` from the primary root)
 - summarize spend with `ak crew-cost-summary` before handoff when useful
 - peek only when needed
-- send explicit guidance when blocked
-- audit before cleanup
+- send explicit guidance when blocked (steered messages land in the crew's durable inbox; see `docs/delivery-protocol.md`)
+- audit before cleanup (audit shows authoritative lifecycle state plus pending inbox records and ring-attempt counts)
 - finish only after the report exists and the worktree is clean
 
 ## Push reporting

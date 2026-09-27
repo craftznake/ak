@@ -62,13 +62,13 @@ Choose the lightest sufficient crew model/command for each delegated workload. P
 2. Run the delegation gate: classify `DIRECT` or `DELEGATE`.
 3. If `DIRECT`, state the whitelist reason when the task could appear non-trivial, then answer or make the tiny edit.
 4. If `DELEGATE`, state a short dispatch plan.
-5. Register primary if needed: `ak primary-set` or `ak primary-set` when the helper is repo-local.
-6. Spawn one or more crews: `ak crew-spawn <slug> <brief>` or `ak crew-spawn <slug> <brief>`.
+5. Register primary if needed: `ak primary-set` when the helper is repo-local.
+6. Spawn one or more crews: `ak crew-spawn <slug> <brief>`.
 7. Keep primary work to intake, supervision, synthesis, final review, and user decisions.
-8. Let crews report back with `ak crew-report`/`ak crew-report`; the report wakes the registered primary instead of relying on a blocking wait loop.
+8. Let crews report back with `ak done`; the report wakes the registered primary instead of relying on a blocking wait loop.
 9. Review reports and inspect worktrees as needed.
 10. Ask user only for real decisions, merge/destructive approval, or scope changes.
-11. Finish safe crews with `ak crew-finish <slug>`/`ak crew-finish <slug>`.
+11. Finish safe crews with `ak crew-finish <slug>`.
 12. Report final outcome.
 
 ## User-facing feel

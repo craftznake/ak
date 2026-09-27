@@ -56,6 +56,10 @@ If delivery cannot be confirmed, `crew-spawn` **exits non-zero** and prints the 
 
 For an `AK_CREW_COMMAND` that is an arbitrary command (not a recognized agent kind), there is no agent state to observe, so the best available proof is the prompt text becoming visible in the pane.
 
+## Primary → worker steering
+
+`ak crew-send <slug> "<message>"` writes a durable, sequenced inbox record under `.agent-kit/crew/<slug>/inbox/` and rings the worker pane with one constant, payload-free doorbell line (a POSIX no-op `: ` prefix keeps it inert in a bare shell). The worker reads records in numeric order and acknowledges each with `ak ack <seq>` (moving it to `handled/`). Unacked `ack-required` records are re-rung on a bounded ladder and then escalated; `ak crew-audit` and `ak crew-sweep <slug>` expose and drive this. The full contract is `docs/delivery-protocol.md`.
+
 ## Progress ledger
 
 For long-running crews, use checkpoints to record completed items that survive session changes:

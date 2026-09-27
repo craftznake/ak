@@ -44,17 +44,19 @@ ak crew-report <slug> "summary, changed files, checks, blockers"
 
 Both go through the same core. That command:
 
-- writes `.agent-kit/crew/<slug>/report.md`
-- appends `.agent-kit/inbox/<timestamp>-<slug>.md`
-- marks the crew state as `reported`
+- writes `.agent-kit/crew/<slug>/report.md` (with a unique report id)
+- appends `.agent-kit/inbox/<timestamp>-<id>-<slug>.md` (unique, never overwritten)
+- transitions the authoritative lifecycle state `running -> reported` (idempotent for repeated reports; a `done` or `failed` crew rejects the report)
 - shows a Herdr notification when available (`AK_NO_NOTIFY=1` disables it)
-- wakes the registered primary agent by sending the summary into its Herdr target (`AK_NO_WAKE=1` disables this per command)
+- wakes the registered primary agent by sending the framed summary into its Herdr target (`AK_NO_WAKE=1` disables this per command)
 
 The wake is built on commands that exist in herdr 0.7.3. It probes the target's agent status first; where an agent surface is available it submits the summary via `herdr agent send <target> <message>` (literal text honoring the pane's bracketed-paste mode) plus an explicit `pane send-keys <target> enter`, then confirms acceptance by waiting for the agent to enter the `working` state with `herdr agent wait <target> --status working --timeout <AK_WAKE_ACCEPT_TIMEOUT>` (default 8000ms). A plain non-agent shell pane falls back to raw `pane send-text` + Enter, and that fallback is logged (no agent to confirm against).
 
-A wake is no longer fire-and-forget. `ak done` / `ak reply` / `crew-report` report a failed wake on stderr, exit non-zero, and record `undelivered_at=<ts>` in `.agent-kit/crew/<slug>/state` so the primary can discover the miss without watching stderr. The durable artifacts (`report.md`, inbox, `chat.log`, `state`) are always written **before** the wake is attempted, so a lost wake never loses a report. Two distinct failure messages are kept separate: "no agent registered at target" (no agent surface; raw fallback engaged and the pane send failed) and "submitted but not confirmed accepted" (the text and Enter reached the pane but the agent did not enter `working` within `AK_WAKE_ACCEPT_TIMEOUT`).
+A wake is no longer fire-and-forget. `ak done` / `ak reply` / `crew-report` report a failed wake on stderr, exit non-zero, and record a single authoritative `undelivered_at=<ts>` in `.agent-kit/crew/<slug>/state` (last-wins, never duplicated) so the primary can discover the miss without watching stderr. The durable artifacts (`report.md`, inbox, `chat.log`, `state`) are always written **before** the wake is attempted, so a lost wake never loses a report. Two distinct failure messages are kept separate: "no agent registered at target" (no agent surface; raw fallback engaged and the pane send failed) and "submitted but not confirmed accepted" (the text and Enter reached the pane but the agent did not enter `working` within `AK_WAKE_ACCEPT_TIMEOUT`). Worker-authored text is flattened to one line and prefixed `[crew <slug>]` before it reaches the primary, so it can never masquerade as a user turn.
 
 `AK_NO_WAKE=1` disables the wake for `ak done` / `ak reply` / `crew-report`; the artifacts are still written and those commands still exit 0. `AK_NO_NOTIFY=1` disables the Herdr notification.
+
+A mid-task note that must not end the crew is recorded with `ak crew-report --note <slug> "..."`: it appends to the crew `notes.md` and the chat transcript without flipping lifecycle state or waking the primary.
 
 If no primary is registered, the command still writes the report and inbox entry and exits 0; there is simply no wake to attempt.
 
