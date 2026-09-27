@@ -56,6 +56,9 @@ Environment:
   AK_CREW_READY_TIMEOUT  max ms to wait for the crew pane's agent to report an
                          input-ready state before the startup prompt is sent
                          (default: 15000)
+  AK_WAKE_ACCEPT_TIMEOUT max ms to wait for a woken agent to enter the working
+                         state before a wake is reported unconfirmed
+                         (default: 8000)
   AK_NO_NOTIFY           disable backend notifications when set to 1
   AK_NO_WAKE             disable primary wakeup injection when set to 1
   AK_COST_CURRENCY       currency label for crew-cost (default: USD)
@@ -1389,6 +1392,16 @@ backend_wake() {
             fi
             if ! herdr pane send-keys "$target" enter --session "$session" >/dev/null 2>&1; then
                 printf 'error: wake submitted to agent %s but the submit key was not confirmed\n' "$target" >&2
+                return 2
+            fi
+            # Delivering the Enter keystroke only proves the key reached the
+            # pane, not that the agent accepted the prompt. Wait for the agent
+            # to enter the working state so a swallowed Enter or a wedged agent
+            # is reported as unconfirmed instead of a false success. An agent
+            # already mid-turn is already working, so the wait returns at once
+            # and the steer is queued for the agent's next turn.
+            if ! herdr agent wait "$target" --status working --timeout "${AK_WAKE_ACCEPT_TIMEOUT:-8000}" --session "$session" >/dev/null 2>&1; then
+                printf 'error: wake was submitted to agent %s but it did not enter working state within %sms (not confirmed accepted)\n' "$target" "${AK_WAKE_ACCEPT_TIMEOUT:-8000}" >&2
                 return 2
             fi
             return 0
