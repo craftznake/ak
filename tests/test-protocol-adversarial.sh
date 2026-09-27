@@ -10,12 +10,14 @@
 #      single inert framed wake (CR/newlines flattened).
 #   D. supervisor retirement: `ak crew-fail` (spawning/running -> failed with a
 #      recorded reason), the failed-state abandon deadlock resolved (a failed
-#      crew is finishable WITHOUT a report, even with a missing worktree), and
-#      the genuine-report guards (dirty worktree, reportless reported/running
-#      crews) still refusing.
+#      crew is finishable WITHOUT a report, even with a missing worktree), the
+#      genuine-report guards (dirty worktree, reportless reported/running
+#      crews) still refusing, and the merge-aware jj retirement guard (a
+#      reported crew whose non-empty change is already merged into the main
+#      line finishes; an unmerged one still refuses).
 #
-# Runs against a scratch git repo with AK_INBOX_RING_OK=1 (simulated doorbell)
-# and AK_DEBUG_WAKE; nothing touches real crews or herdr.
+# Runs against scratch git and jj repos with AK_INBOX_RING_OK=1 (simulated
+# doorbell) and AK_DEBUG_WAKE; nothing touches real crews or herdr.
 set -eu
 
 AK=$(cd "$(dirname "$0")/.." && pwd)/bin/ak
@@ -248,5 +250,65 @@ mkcrew g3
 printf 'schema=ak-crew-state.v1\nstate=reported\n' >"$tmp/.agent-kit/crew/g3/state"
 run crew-finish --abandon g3 >/dev/null 2>&1 && fail "D6: reportless reported crew was finished"
 ok "D6 OK (dirty/reportless guards intact for non-failed crews)"
+
+echo "== D7. jj reported crew: merged non-empty change finishes; unmerged refuses =="
+# Scratch jj repo with its own `master`, mirroring the real repo setup:
+# `.agent-kit/` is ignored from the first commit, so crew bookkeeping files
+# never dirty the default workspace (untracked .agent-kit files would
+# auto-snapshot the default working copy, rewrite master, and leave the crew
+# workspace stale - crew_worktree_clean would then refuse and mask the guard
+# under test).
+command -v jj >/dev/null 2>&1 || fail "D7: jj not available"
+jjroot="$tmp/jjroot"
+jj git init "$jjroot" >/dev/null 2>&1
+printf '.agent-kit/\n' >"$jjroot/.gitignore"
+echo base >"$jjroot/base.txt"
+(cd "$jjroot" && jj describe -m base --quiet >/dev/null && jj commit -m base --quiet >/dev/null \
+    && jj bookmark set master -r @- >/dev/null 2>&1)
+runj() { (cd "$jjroot" && "$AK" "$@"); }
+jjcrew() {
+    slug=$1
+    change=$2
+    wt="$tmp/wt-$slug"
+    mkdir -p "$jjroot/.agent-kit/crew/$slug"
+    printf 'slug=%s\nrepo=%s\nworktree=%s\nbranch=ak/%s\nvcs=jj\njj_change=%s\nbrief=%s\n' \
+        "$slug" "$jjroot" "$wt" "$slug" "$change" "$jjroot/.agent-kit/crew/$slug/brief.md" \
+        >"$jjroot/.agent-kit/crew/$slug/meta"
+    printf 'schema=ak-crew-state.v1\nstate=reported\n' >"$jjroot/.agent-kit/crew/$slug/state"
+    printf '# Crew report: %s\n\ngenuine report\n' "$slug" >"$jjroot/.agent-kit/crew/$slug/report.md"
+}
+# Crew j2: non-empty change NOT merged into the main line.
+(cd "$jjroot" && jj workspace add --name j2 -m "agent-kit crew: j2" "$tmp/wt-j2") >/dev/null 2>&1
+echo wip >"$tmp/wt-j2/wip.txt"
+(cd "$tmp/wt-j2" && jj commit -m "unmerged crew work" --quiet >/dev/null 2>&1)
+jjz=$(jj -R "$tmp/wt-j2" log --no-graph -r @- -T 'change_id.short()' --no-pager)
+jjcrew j2 "$jjz"
+# Crew j1: non-empty change merged into the main line via a real merge
+# commit, and its workspace parked on a fresh empty change on master.
+(cd "$jjroot" && jj workspace add --name j1 -m "agent-kit crew: j1" "$tmp/wt-j1") >/dev/null 2>&1
+echo work >"$tmp/wt-j1/work.txt"
+(cd "$tmp/wt-j1" && jj commit -m "agent-kit crew: j1" --quiet >/dev/null 2>&1)
+jjx=$(jj -R "$tmp/wt-j1" log --no-graph -r @- -T 'change_id.short()' --no-pager)
+(cd "$jjroot" && jj new master "$jjx" -m "merge: j1" --quiet >/dev/null 2>&1 \
+    && jj bookmark move master --to @ >/dev/null 2>&1)
+(cd "$tmp/wt-j1" && jj new master -m "post-merge sync" --quiet >/dev/null 2>&1)
+jjcrew j1 "$jjx"
+# Unmerged non-empty change still refuses (unmerged work is never destroyed).
+out=$(runj crew-finish j2 2>&1) && fail "D7: unmerged non-empty change was finished (work destroyed?)"
+printf '%s\n' "$out" | grep -q 'not merged into the main line; leaving crew intact' \
+    || fail "D7: unmerged crew refused for the wrong reason: $out"
+grep -q '^state=reported$' "$jjroot/.agent-kit/crew/j2/state" || fail "D7: unmerged crew state mutated by refused finish"
+[ -e "$tmp/wt-j2" ] || fail "D7: unmerged crew worktree destroyed"
+# Merged non-empty change finishes cleanly, via the merge-aware guard.
+out=$(runj crew-finish j1 2>&1) || fail "D7: merged non-empty change refused: $out"
+printf '%s\n' "$out" | grep -q 'merged into the main line; proceeding with finish' \
+    || fail "D7: merged crew finished without the merge-aware guard: $out"
+grep -q '^state=done$' "$jjroot/.agent-kit/crew/j1/state" || fail "D7: merged crew state not done"
+[ ! -e "$tmp/wt-j1" ] || fail "D7: merged crew worktree not torn down"
+jj -R "$jjroot" workspace list --no-pager 2>/dev/null | grep -q '^j1:' \
+    && fail "D7: jj workspace j1 not forgotten"
+jj -R "$jjroot" log --no-graph -r "$jjx" -T 'change_id.short()' --no-pager >/dev/null 2>&1 \
+    || fail "D7: merged crew change lost after finish"
+ok "D7 OK (jj merged non-empty change finishes; unmerged still refuses)"
 
 echo "protocol-adversarial self-test: PASS"
