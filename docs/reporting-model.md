@@ -50,9 +50,13 @@ Both go through the same core. That command:
 - shows a Herdr notification when available (`AK_NO_NOTIFY=1` disables it)
 - wakes the registered primary agent by sending the summary into its Herdr target (`AK_NO_WAKE=1` disables this per command)
 
-The wake uses `herdr agent prompt <target> <message>` (fire-and-forget, no `--wait`), which atomically submits text and an encoded Enter while honoring the pane's live bracketed-paste mode. This is reliable where raw `pane send-text` + `pane send-keys enter` was not: the Enter can no longer land without actually submitting. If the registered target does not resolve to a recognized Herdr agent (e.g. a plain shell pane), `primary_notify` falls back to the raw `pane send-text` + `pane send-keys enter` path as a last resort.
+The wake is built on commands that exist in herdr 0.7.3. It probes the target's agent status first; where an agent surface is available it submits the summary via `herdr agent send <target> <message>` (literal text honoring the pane's bracketed-paste mode) plus an explicit `pane send-keys <target> enter`, then confirms acceptance by waiting for the agent to enter the `working` state with `herdr agent wait <target> --status working --timeout <AK_WAKE_ACCEPT_TIMEOUT>` (default 8000ms). A plain non-agent shell pane falls back to raw `pane send-text` + Enter, and that fallback is logged (no agent to confirm against).
 
-If no primary is registered, the command still writes the report and inbox entry; it just cannot wake a primary session.
+A wake is no longer fire-and-forget. `ak done` / `ak reply` / `crew-report` report a failed wake on stderr, exit non-zero, and record `undelivered_at=<ts>` in `.agent-kit/crew/<slug>/state` so the primary can discover the miss without watching stderr. The durable artifacts (`report.md`, inbox, `chat.log`, `state`) are always written **before** the wake is attempted, so a lost wake never loses a report. Two distinct failure messages are kept separate: "no agent registered at target" (no agent surface; raw fallback engaged and the pane send failed) and "submitted but not confirmed accepted" (the text and Enter reached the pane but the agent did not enter `working` within `AK_WAKE_ACCEPT_TIMEOUT`).
+
+`AK_NO_WAKE=1` disables the wake for `ak done` / `ak reply` / `crew-report`; the artifacts are still written and those commands still exit 0. `AK_NO_NOTIFY=1` disables the Herdr notification.
+
+If no primary is registered, the command still writes the report and inbox entry and exits 0; there is simply no wake to attempt.
 
 ## Cleanup remains separate
 

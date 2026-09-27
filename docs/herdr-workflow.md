@@ -44,9 +44,17 @@ The wrapper refuses Herdr operations when `herdr` is missing; it does not silent
 
 ## Crew startup handoff
 
-`crew-spawn` starts the crew's harness with `herdr agent start <name> --kind <kind> --pane <id>` whenever `AK_CREW_COMMAND` (default `pi`) resolves to a recognized Herdr agent kind (`pi`, `claude`, `codex`, `gemini`, `cursor`, `devin`, `agy`, `cline`, `omp`, `mastracode`, `opencode`, `copilot`, `kimi`, `kiro`, `droid`, `amp`, `grok`, `hermes`, `kilo`, `qodercli`, `maki`). `agent start` only returns once Herdr detects the agent and it is ready for input, so no readiness guessing is needed. The startup prompt (read the brief and begin) is then submitted with `herdr agent prompt <target> "<prompt>" --wait --timeout "$AK_CREW_STARTUP_TIMEOUT"` (default 120000ms), which atomically submits text and an encoded Enter honoring the pane's live bracketed-paste mode. A timeout only logs a warning; it does not fail `crew-spawn`, since the crew may simply be slow to start or already working.
+The installed herdr (0.7.x) cannot attach a named agent to an existing pane: `herdr agent start` no longer accepts `--kind/--pane`, and `herdr agent prompt` does not exist. `crew-spawn` probes for `--pane` support once (`herdr agent start --help`) and, on 0.7.x, always launches the crew command with `herdr pane run <pane> <cmd>`; Herdr then auto-detects the harness (e.g. `pi`) in the pane. On a herdr that does support pane attach, the `agent start` path is still used.
 
-For an `AK_CREW_COMMAND` that is an arbitrary command (not a recognized agent kind), `crew-spawn` keeps using `herdr pane run` as before, then polls `herdr agent get` briefly for Herdr's own agent auto-detection before submitting the startup prompt (via `herdr agent prompt` if an agent is detected, otherwise via raw `herdr pane send-text` + `herdr pane send-keys enter` as a last resort).
+The startup prompt (read the brief and begin, then hand back from the worktree with `ak done`) is submitted as raw pane input (`pane send-text` + Enter), and **delivery is proven, not assumed**:
+
+1. `crew-spawn` waits up to `AK_CREW_READY_TIMEOUT` (default 15000ms) for the pane's agent to report an input-ready state (`idle`/`done`).
+2. It submits the prompt, then polls the agent status until the agent **leaves** `idle`/`done` (working/blocked, or idle→done), re-pressing Enter only (never retyping) while the submit key is swallowed during TUI startup.
+3. `AK_CREW_STARTUP_TIMEOUT` (default 120000ms) is a single overall wall-clock deadline bounding both phases, so a broken pane cannot hang spawn forever.
+
+If delivery cannot be confirmed, `crew-spawn` **exits non-zero** and prints the worktree path plus an exact `crew-send` recovery command; it never prints `crew spawned` over a silently deaf crew. The crew's `meta` file is written before the tab is created, so an aborted spawn is still visible to `crew-status`/`crew-audit`/`crew-finish`.
+
+For an `AK_CREW_COMMAND` that is an arbitrary command (not a recognized agent kind), there is no agent state to observe, so the best available proof is the prompt text becoming visible in the pane.
 
 ## Progress ledger
 

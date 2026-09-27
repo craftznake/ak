@@ -52,7 +52,7 @@ Primary and workers share a durable per-crew transcript at `.agent-kit/crew/<slu
 - Worker → primary, completion: `ak done "<summary>"` (writes the report, logs it, wakes the primary).
 - Read the transcript: `ak chat <slug> [lines]` as primary, or just `ak chat` as a worker (it resolves its own slug).
 
-`ak reply` and `ak done` resolve the primary from the worker role marker, so they work from inside the worktree without extra arguments.
+`ak reply` and `ak done` resolve the primary from the worker role marker, so they work from inside the worktree without extra arguments. `ak done` is the canonical worker handback; `ak crew-report <slug> "<summary>"` is the documented equivalent for the primary repo root, and both run the same core and write the same artifacts.
 
 ## Backend
 
