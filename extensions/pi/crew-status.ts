@@ -466,23 +466,48 @@ function statusColorFor(status: string): ThemeColor {
     return STATUS_COLOR[status] ?? "muted";
 }
 
-/** Strip markdown emphasis and clip a purpose to a compact one-liner. */
-function clipPurpose(text: string, max = 64): string {
-    const t = text.replace(/\*\*/g, "").replace(/`/g, "").replace(/\s+/g, " ").trim();
-    if (t.length <= max) return t;
-    return t.slice(0, max - 1).trimEnd() + "…";
+/** Strip markdown emphasis and normalize a purpose for display. */
+function normalizePurpose(text: string): string {
+    return text.replace(/\*\*/g, "").replace(/`/g, "").replace(/\s+/g, " ").trim();
+}
+
+/** Wrap text by terminal display width without dropping any characters. */
+function wrapText(text: string, width: number): string[] {
+    if (width <= 0) return [text];
+    const lines: string[] = [];
+    let line = "";
+    for (const word of text.split(" ")) {
+        if (!word) continue;
+        const candidate = line ? `${line} ${word}` : word;
+        if (visibleWidth(candidate) <= width) {
+            line = candidate;
+            continue;
+        }
+        if (line) lines.push(line);
+        line = "";
+        for (const char of word) {
+            if (visibleWidth(line + char) > width && line) {
+                lines.push(line);
+                line = "";
+            }
+            line += char;
+        }
+    }
+    if (line) lines.push(line);
+    return lines;
 }
 
 /** Fit `left` and `right` between two edge glyphs, filling the gap with `fill`. */
-function frameLine(width: number, left: string, right: string, leftEdge: string, rightEdge: string, fill: string): string {
+function frameLine(width: number, left: string, right: string, leftEdge: string, rightEdge: string, fill: string, preserveLeft = false): string {
     const inner = Math.max(0, width - 2);
     let l = left;
     let r = right;
-    while (visibleWidth(l) + visibleWidth(r) > inner && visibleWidth(r) > 0) {
-        r = truncateToWidth(r, Math.max(0, visibleWidth(r) - 1), "");
-    }
-    while (visibleWidth(l) + visibleWidth(r) > inner && visibleWidth(l) > 0) {
-        l = truncateToWidth(l, Math.max(0, visibleWidth(l) - 1), "");
+    while (visibleWidth(l) + visibleWidth(r) > inner && visibleWidth(preserveLeft ? r : l) > 0) {
+        if (preserveLeft) {
+            r = truncateToWidth(r, Math.max(0, visibleWidth(r) - 1), "");
+        } else {
+            l = truncateToWidth(l, Math.max(0, visibleWidth(l) - 1), "");
+        }
     }
     const gap = Math.max(0, inner - visibleWidth(l) - visibleWidth(r));
     return leftEdge + l + fill.repeat(gap) + r + rightEdge;
@@ -508,7 +533,7 @@ export default function crewStatus(pi: ExtensionAPI) {
     let widgetInstalled = false;
     let consecutiveUnavailableTokens = 0;
 
-    const model = new Map<string, CrewRow>();
+    let model = new Map<string, CrewRow>();
 
     function stopTimer() {
         if (timer) {
@@ -523,7 +548,7 @@ export default function crewStatus(pi: ExtensionAPI) {
         polling = false;
         requestRender = undefined;
         widgetInstalled = false;
-        model.clear();
+        model = new Map<string, CrewRow>();
         if (ctx?.hasUI) ctx.ui.setWidget(WIDGET_KEY, undefined);
     }
 
@@ -592,12 +617,19 @@ export default function crewStatus(pi: ExtensionAPI) {
                     : "";
             const right = `${statusStyled}${tag} ` + style(`· ${age}`, (t) => t.fg("dim", `· ${age}`)) + " ";
 
-            lines.push(frameLine(width, left, right, "│", "│", " "));
+            // Prefer preserving the crew identity; trim the status/age only when
+            // the terminal is too narrow to fit both fields.
+            lines.push(frameLine(width, left, right, "│", "│", " ", true));
 
             if (c.purpose) {
-                const purposeText = clipPurpose(c.purpose);
-                const p = style(`↳ ${purposeText}`, (t) => t.fg("dim", `↳ ${purposeText}`));
-                lines.push(frameLine(width, "   " + p, "", "│", "│", " "));
+                const purposeText = normalizePurpose(c.purpose);
+                const prefix = "   ↳ ";
+                const purposeLines = wrapText(purposeText, Math.max(1, width - visibleWidth(prefix) - 2));
+                for (let i = 0; i < purposeLines.length; i++) {
+                    const line = `${i === 0 ? prefix : "     "}${purposeLines[i]}`;
+                    const styledLine = style(line, (t) => t.fg("dim", line));
+                    lines.push(frameLine(width, styledLine, "", "│", "│", " "));
+                }
             }
             if (!c.hasMeta) {
                 const note = style("no meta (spawn may have aborted)", (t) =>
@@ -611,7 +643,7 @@ export default function crewStatus(pi: ExtensionAPI) {
         return lines;
     }
 
-    function syncModel(dirs: string[]) {
+    function syncModel(dirs: string[], nextModel: Map<string, CrewRow>) {
         const seen = new Set<string>();
         for (const dir of dirs) {
             const crew = readCrew(dir);
@@ -623,16 +655,16 @@ export default function crewStatus(pi: ExtensionAPI) {
                 crew.liveStatus = prev.liveStatus;
                 crew.statusSinceMs = prev.statusSinceMs;
             }
-            model.set(crew.slug, crew);
+            nextModel.set(crew.slug, crew);
         }
-        for (const slug of [...model.keys()]) {
-            if (!seen.has(slug)) model.delete(slug);
+        for (const slug of [...nextModel.keys()]) {
+            if (!seen.has(slug)) nextModel.delete(slug);
         }
     }
 
-    async function refreshLiveStatuses(): Promise<void> {
+    async function refreshLiveStatuses(nextModel: Map<string, CrewRow>): Promise<void> {
         const bySession = new Map<string, CrewRow[]>();
-        for (const crew of model.values()) {
+        for (const crew of nextModel.values()) {
             if (!crew.session || !crew.pane) continue;
             const list = bySession.get(crew.session);
             if (list) list.push(crew);
@@ -667,28 +699,32 @@ export default function crewStatus(pi: ExtensionAPI) {
             const found = root ?? findRoot(latestCtx?.cwd ?? process.cwd());
             root = resolveCrewRoot(found);
             const dirs = root ? listCrewDirs(root) : [];
-            syncModel(dirs);
+            const nextModel = new Map<string, CrewRow>();
+            // Seed from the last published snapshot so status and age carry
+            // across polls; only this private candidate is mutated until ready.
+            for (const [slug, crew] of model) nextModel.set(slug, crew);
+            syncModel(dirs, nextModel);
             // Retired crews (state=done: `ak crew-finish` already tore their
             // worktree/workspace/tab down) leave the panel entirely — a
             // display-only filter, their records stay readable on disk
             // under .agent-kit/crew/<slug>/. Everything else stays visible
             // until retired: reported/failed crews render honestly until
             // the primary finishes them.
-            for (const [slug, crew] of [...model]) {
-                if (crew.lifecycleState === "done") model.delete(slug);
+            for (const [slug, crew] of [...nextModel]) {
+                if (crew.lifecycleState === "done") nextModel.delete(slug);
             }
             // Live statuses next: the scope filter below judges untagged
             // legacy crews by their live herdr status, so it must run after
             // the refresh. Render once, only after scoping, so stale rows
             // never flash.
-            await refreshLiveStatuses();
+            await refreshLiveStatuses(nextModel);
             const tokenRead = root ? readPrimaryToken(root) : { status: "unavailable" as const };
             if (tokenRead.status === "valid") {
                 consecutiveUnavailableTokens = 0;
                 const token = tokenRead.token;
                 const isOwner = isRegisteredPrimary(token, latestCtx);
-                for (const [slug, crew] of [...model]) {
-                    if (!isCrewVisible(crew, token, isOwner)) model.delete(slug);
+                for (const [slug, crew] of [...nextModel]) {
+                    if (!isCrewVisible(crew, token, isOwner)) nextModel.delete(slug);
                 }
             } else {
                 // A missing/partial token is indistinguishable from an interrupted atomic replace
@@ -696,11 +732,12 @@ export default function crewStatus(pi: ExtensionAPI) {
                 // revoke it, while any valid foreign token still revokes immediately above.
                 consecutiveUnavailableTokens++;
                 if (consecutiveUnavailableTokens >= 2) {
-                    for (const [slug, crew] of [...model]) {
-                        if (crew.sessionId) model.delete(slug);
+                    for (const [slug, crew] of [...nextModel]) {
+                        if (crew.sessionId) nextModel.delete(slug);
                     }
                 }
             }
+            model = nextModel;
             requestRender?.();
         } catch {
             // Keep the last good model; never let a poll error blank the panel.
