@@ -653,6 +653,13 @@ primary_set() {
     fi
     ensure_runtime_ignored
     mkdir -p "$(agentkit_dir)"
+    # pi_session records the registering pi session's identity (PI_SESSION_ID
+    # in the shell environment pi gives its shell-tool commands). The
+    # crew-status panel compares it against its own pi session id so only the
+    # registering pi process renders the token's session-tagged crews. Empty
+    # when primary-set runs outside a pi shell (e.g. a plain terminal): such
+    # a token is owned by nobody and the panel renders no tagged crews until
+    # primary-set is re-run from inside the primary pi session.
     cat >"$(primary_path)" <<EOF
 schema=ak-primary.v1
 session=$session
@@ -663,6 +670,7 @@ workspace=${workspace:-}
 cwd=${cwd:-}
 inject=$inject
 session_id=$(rand_hex)
+pi_session=${PI_SESSION_ID:-}
 registered_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
     printf 'primary target registered: %s\n' "$target"

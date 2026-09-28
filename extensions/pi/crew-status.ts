@@ -9,7 +9,15 @@
 //   <repo>/.agent-kit/crew/<slug>/state       key=value: state=running|reported|done,
 //                                             started_at, reported_at, finished_at
 //   <repo>/.agent-kit/crew/<slug>/brief.md    "# Objective" section -> one-line purpose
-//   herdr agent list --session <session>      live agent_status per pane (JSON)
+//   <repo>/.agent-kit/primary                 session_id + pi_session tokens
+//                                             (pi_session = the registering pi
+//                                             session's PI_SESSION_ID)
+//   herdr agent list --session <session>      live agent_status + agent name
+//                                             per pane (JSON); a pane is the
+//                                             crew's own only when pane_id AND
+//                                             the crew's `crew-<slug>` agent
+//                                             name both match (pane ids get
+//                                             recycled)
 //
 // The live status comes from herdr (`herdr agent list`, one subprocess per
 // distinct session per poll) rather than the write-only `state` file, matching
@@ -26,14 +34,22 @@
 // refreshed every AK_CREW_STATUS_INTERVAL_MS (default 3000ms).
 //
 //
-// Scope: primary sessions only, and only the current session's crews. A
+// Scope: the registered primary only, and only its own session's crews. A
 // worker checkout (.agent-kit/role with role=worker) renders nothing at all
-// and never starts the polling loop. In a primary session a crew is included
-// iff its meta session_id equals the current session token from
-// .agent-kit/primary; a legacy crew with no session_id in meta is included
-// only while actually live. Crews from other pi sessions are no longer live,
-// so they cannot appear — this is structural, not a threshold (no
-// elapsed-time/mtime/state filtering).
+// and never starts the polling loop. A tagged crew (meta session_id) is
+// included iff this pi process verifiably owns the primary token — the
+// token's pi_session (recorded by `ak primary-set` from the registering pi
+// session's PI_SESSION_ID) must equal this process's own pi session id
+// (ctx.sessionManager) — AND the crew's session_id equals the token's
+// session_id. A token that cannot be proven owned (missing pi_session, e.g.
+// registered before the field existed) renders no tagged crews anywhere
+// until the primary re-registers: fail safe, never another session's crews.
+// A legacy crew with no session_id in meta is included only while
+// verifiably live: its herdr pane must exist AND carry the crew's own
+// `crew-<slug>` agent name (bare pane-id matches are not identity — herdr
+// pane ids get recycled). Fully retired crews (state=done: crew-finish
+// already tore their worktree and tab down) are not rendered at all; their
+// records stay on disk under .agent-kit/crew/<slug>/.
 //
 // Disable: AK_CREW_STATUS=0 (also "false"/"off"/"no") disables at load; the
 // /crew-status on|off command toggles at runtime.
@@ -107,16 +123,49 @@ function readKeyValueFile(file: string): Record<string, string> {
 }
 
 // ---------------------------------------------------------------------------
-// Session scoping (current session only) + worker suppression
+// Primary-token ownership + session scoping + worker suppression
 // ---------------------------------------------------------------------------
 
-/** Current session token from `.agent-kit/primary` (key `session_id=`).
+/** Primary token fields from `.agent-kit/primary` (written by `ak
+ * primary-set`): `session_id=` (the registration's crew-scope token) and
+ * `pi_session=` (the registering pi session's PI_SESSION_ID — the pi
+ * process identity that owns the token).
  *
  * Read fresh on every collection tick — the primary may re-register
  * mid-session and the token changes, so it is never cached for the process
- * lifetime. */
-function readPrimarySessionId(root: string): string | undefined {
-    return readKeyValueFile(path.join(root, ".agent-kit", "primary")).session_id || undefined;
+ * lifetime. Returns undefined when no token file exists. */
+interface PrimaryToken {
+    sessionId?: string;
+    piSessionId?: string;
+}
+
+function readPrimaryToken(root: string): PrimaryToken | undefined {
+    const file = path.join(root, ".agent-kit", "primary");
+    if (!fs.existsSync(file)) return undefined;
+    const kv = readKeyValueFile(file);
+    return {
+        sessionId: kv.session_id || undefined,
+        piSessionId: kv.pi_session || undefined,
+    };
+}
+
+/** True iff this pi process is verifiably the one that registered the
+ * primary token: the token's `pi_session` (recorded by `ak primary-set`
+ * from the registering session's PI_SESSION_ID) must equal this process's
+ * own pi session id (`ctx.sessionManager.getSessionId()` — the same value
+ * pi exposes to shell commands as PI_SESSION_ID). A token without
+ * `pi_session` (registered before the field existed, or from a non-pi
+ * shell) can be owned by nobody: fail safe — a pi tab that cannot prove
+ * ownership must not render another session's crews. */
+function isRegisteredPrimary(token: PrimaryToken | undefined, ctx: ExtensionContext | undefined): boolean {
+    if (!token?.piSessionId) return false;
+    let own: string | undefined;
+    try {
+        own = ctx?.sessionManager.getSessionId() || undefined;
+    } catch {
+        return false;
+    }
+    return !!own && token.piSessionId === own;
 }
 
 /** A worker checkout is one whose `.agent-kit/role` carries `role=worker`
@@ -127,25 +176,30 @@ function isWorkerCheckout(root: string | undefined): boolean {
     return readKeyValueFile(path.join(root, ".agent-kit", "role")).role === "worker";
 }
 
-// Include a crew iff its meta `session_id` equals the current session token
-// from `.agent-kit/primary`: crews from other pi sessions are no longer live,
-// so they cannot appear — this is structural, not a threshold. (No
+// Include a session-tagged crew (meta `session_id`) iff this pi process is
+// verifiably the registered primary (the token's `pi_session` equals this
+// process's own pi session id — see isRegisteredPrimary) AND the crew's
+// meta `session_id` equals the token's `session_id`: a foreign pi tab
+// reading the same on-disk token must not render the registered primary's
+// crews, and crews from other pi sessions are no longer live, so they
+// cannot appear — this is structural, not a threshold. (No
 // elapsed-time/mtime filtering; the `state` file is not authoritative for
-// liveness.) A legacy crew with no `session_id` in meta is included only if it
-// is live right now: its herdr agent status is neither gone, agent_not_found,
-// missing, nor unknown.
+// liveness.) A legacy crew with no `session_id` in meta is included only
+// while verifiably live right now: its herdr pane must carry the crew's own
+// `crew-<slug>` agent name (see refreshLiveStatuses) and its status must be
+// neither gone, agent_not_found, missing, nor unknown.
 const NON_LIVE_STATUSES: ReadonlySet<string> = new Set(["gone", "agent_not_found", "missing", "unknown"]);
 
 function isLiveStatus(status: string): boolean {
     return !NON_LIVE_STATUSES.has(status);
 }
 
-function isCrewVisible(crew: CrewRow, currentSessionId: string | undefined): boolean {
+function isCrewVisible(crew: CrewRow, token: PrimaryToken | undefined, isOwner: boolean): boolean {
     if (crew.sessionId) {
-        return currentSessionId !== undefined && crew.sessionId === currentSessionId;
+        return isOwner && !!token?.sessionId && crew.sessionId === token.sessionId;
     }
     // Legacy untagged crew (spawned before session_id was written to meta):
-    // visible only while actually live right now.
+    // visible only while verifiably live right now.
     return isLiveStatus(crew.liveStatus);
 }
 
@@ -327,20 +381,42 @@ function resolveCrewRoot(foundRoot: string | undefined): string | undefined {
 // Live status via herdr
 // ---------------------------------------------------------------------------
 
-async function queryAgents(pi: ExtensionAPI, session: string, timeoutMs: number): Promise<Map<string, string> | undefined> {
+/** The herdr agent name `crew_spawn` starts each crew's agent under
+ * (bin/ak: `slugify "crew-$slug" | cut -c1-32`): lowercase, runs of
+ * non-alphanumerics collapsed to single dashes, edge dashes trimmed, cut
+ * to 32 characters. */
+export function crewAgentName(slug: string): string {
+    return ("crew-" + slug)
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+/, "")
+        .replace(/-+$/, "")
+        .slice(0, 32);
+}
+
+/** One herdr agent from `herdr agent list`: its live status and its agent
+ * name (null when the pane hosts no named agent). */
+interface HerdrAgent {
+    status: string;
+    name: string | null;
+}
+
+async function queryAgents(pi: ExtensionAPI, session: string, timeoutMs: number): Promise<Map<string, HerdrAgent> | undefined> {
     try {
         const result = await pi.exec("herdr", ["agent", "list", "--session", session], { timeout: timeoutMs });
         if (result.code !== 0) return undefined;
         const parsed = JSON.parse(result.stdout) as {
-            result?: { agents?: Array<{ pane_id?: unknown; agent_status?: unknown }> };
+            result?: { agents?: Array<{ pane_id?: unknown; name?: unknown; agent_status?: unknown }> };
         };
         const agents = parsed?.result?.agents;
         if (!Array.isArray(agents)) return undefined;
-        const map = new Map<string, string>();
+        const map = new Map<string, HerdrAgent>();
         for (const a of agents) {
             const pane = a?.pane_id;
             const status = a?.agent_status;
-            if (typeof pane === "string" && typeof status === "string") map.set(pane, status);
+            if (typeof pane === "string" && typeof status === "string") {
+                map.set(pane, { status, name: typeof a?.name === "string" ? a.name : null });
+            }
         }
         return map;
     } catch {
@@ -475,16 +551,9 @@ export default function crewStatus(pi: ExtensionAPI) {
                 a.slug.localeCompare(b.slug),
         );
 
-        if (crews.length === 0) {
-            const title = style("Crews", (t) => t.fg("accent", t.bold ? t.bold("Crews") : "Crews"));
-            const noteText = root ? "no crews" : "no .agent-kit state found here";
-            const note = style(noteText, (t) => t.fg("muted", noteText));
-            return [
-                frameLine(width, "─ " + title + " ", " ─", "┌", "┐", "─"),
-                frameLine(width, "  " + note, "", "│", "│", " "),
-                frameLine(width, "─", "─", "└", "┘", "─"),
-            ];
-        }
+        // Nothing to show: render no panel at all (no border, no note) so an
+        // empty fleet takes zero vertical space instead of an empty box.
+        if (crews.length === 0) return [];
 
         const now = Date.now();
         const working = crews.filter((c) => c.liveStatus === "working").length;
@@ -563,7 +632,20 @@ export default function crewStatus(pi: ExtensionAPI) {
         for (const [session, crews] of bySession) {
             const agents = await queryAgents(pi, session, herdrTimeoutMs);
             for (const crew of crews) {
-                const next = agents === undefined ? "unknown" : (agents.get(crew.pane!) ?? "gone");
+                let next: string;
+                if (agents === undefined) {
+                    next = "unknown";
+                } else {
+                    const entry = agents.get(crew.pane!);
+                    // A bare pane-id match is not identity: herdr pane ids
+                    // get recycled, so a live pane carrying a dead crew's old
+                    // id is a brand-new unrelated tab. The crew's pane is
+                    // live only if that pane's herdr agent carries the
+                    // crew's own `crew-<slug>` name; anything else (absent
+                    // pane, a nameless pane, some other agent) is gone — a
+                    // recycled pane id must never resurrect a dead crew.
+                    next = entry && entry.name === crewAgentName(crew.slug) ? entry.status : "gone";
+                }
                 setStatus(crew, next);
             }
         }
@@ -577,14 +659,24 @@ export default function crewStatus(pi: ExtensionAPI) {
             root = resolveCrewRoot(found);
             const dirs = root ? listCrewDirs(root) : [];
             syncModel(dirs);
-            // Live statuses first: the session-scope filter below judges
-            // untagged legacy crews by their live herdr status, so it must run
-            // after the refresh. Render once, only after scoping, so stale
-            // rows never flash.
-            await refreshLiveStatuses();
-            const currentSessionId = root ? readPrimarySessionId(root) : undefined;
+            // Retired crews (state=done: `ak crew-finish` already tore their
+            // worktree/workspace/tab down) leave the panel entirely — a
+            // display-only filter, their records stay readable on disk
+            // under .agent-kit/crew/<slug>/. Everything else stays visible
+            // until retired: reported/failed crews render honestly until
+            // the primary finishes them.
             for (const [slug, crew] of [...model]) {
-                if (!isCrewVisible(crew, currentSessionId)) model.delete(slug);
+                if (crew.lifecycleState === "done") model.delete(slug);
+            }
+            // Live statuses next: the scope filter below judges untagged
+            // legacy crews by their live herdr status, so it must run after
+            // the refresh. Render once, only after scoping, so stale rows
+            // never flash.
+            await refreshLiveStatuses();
+            const token = root ? readPrimaryToken(root) : undefined;
+            const isOwner = isRegisteredPrimary(token, latestCtx);
+            for (const [slug, crew] of [...model]) {
+                if (!isCrewVisible(crew, token, isOwner)) model.delete(slug);
             }
             requestRender?.();
         } catch {
