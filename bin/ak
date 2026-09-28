@@ -653,6 +653,13 @@ primary_set() {
     fi
     ensure_runtime_ignored
     mkdir -p "$(agentkit_dir)"
+    # pi_session records the registering pi session's identity (PI_SESSION_ID
+    # in the shell environment pi gives its shell-tool commands). The
+    # crew-status panel compares it against its own pi session id so only the
+    # registering pi process renders the token's session-tagged crews. Empty
+    # when primary-set runs outside a pi shell (e.g. a plain terminal): such
+    # a token is owned by nobody and the panel renders no tagged crews until
+    # primary-set is re-run from inside the primary pi session.
     cat >"$(primary_path)" <<EOF
 schema=ak-primary.v1
 session=$session
@@ -663,6 +670,7 @@ workspace=${workspace:-}
 cwd=${cwd:-}
 inject=$inject
 session_id=$(rand_hex)
+pi_session=${PI_SESSION_ID:-}
 registered_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
     printf 'primary target registered: %s\n' "$target"
@@ -1897,18 +1905,32 @@ EOF
         fi
     fi
     jj_change=
+    jj_change_merged=0
     if [ "$vcs" = jj ]; then
         jj_change=$(crew_field "$slug" jj_change 2>/dev/null || true)
         [ -n "$jj_change" ] || jj_change=$(jj_current_change_id "$worktree" 2>/dev/null || true)
         if [ -n "$jj_change" ] && jj -R "$root" log --no-graph -r "$jj_change" -T 'change_id.short()' --no-pager >/dev/null 2>&1; then
             if ! jj_change_empty "$root" "$jj_change"; then
-                printf 'jj workspace change is not empty; leaving crew intact: %s\n' "$jj_change" >&2
-                exit 1
-            fi
-            desc=$(jj_change_description "$root" "$jj_change")
-            if [ "$desc" != "agent-kit crew: $slug" ]; then
-                printf 'jj workspace change description did not match; leaving crew intact: %s\n' "$jj_change" >&2
-                exit 1
+                # Merge-aware guard: a non-empty change is still safe to finish
+                # past when it is already contained in the main line - the work
+                # is part of history and no teardown can lose it. ak has no
+                # repo-configured main-bookmark notion, so the conventional
+                # `master` bookmark is used here. A merged change is preserved
+                # as-is, so the empty-change description guard below does not
+                # apply to it.
+                if [ -n "$(jj -R "$root" log --no-graph -r "present($jj_change) & ::master" -T 'change_id.short()' --no-pager 2>/dev/null)" ]; then
+                    jj_change_merged=1
+                    printf 'jj workspace change is merged into the main line; proceeding with finish: %s\n' "$jj_change" >&2
+                else
+                    printf 'jj workspace change is not empty and not merged into the main line; leaving crew intact: %s\n' "$jj_change" >&2
+                    exit 1
+                fi
+            else
+                desc=$(jj_change_description "$root" "$jj_change")
+                if [ "$desc" != "agent-kit crew: $slug" ]; then
+                    printf 'jj workspace change description did not match; leaving crew intact: %s\n' "$jj_change" >&2
+                    exit 1
+                fi
             fi
         fi
     fi
@@ -1931,7 +1953,12 @@ EOF
                 exit 1
             fi
         }
-        jj_abandon_empty_change "$root" "$jj_change" "agent-kit crew: $slug"
+        # A non-empty merged change is kept via the main line; it must NOT be
+        # abandoned (jj_abandon_empty_change would refuse it and fail the
+        # finish halfway). Only empty crew changes are abandoned on teardown.
+        if [ "$jj_change_merged" != 1 ]; then
+            jj_abandon_empty_change "$root" "$jj_change" "agent-kit crew: $slug"
+        fi
         rm -rf "$worktree" || {
             printf 'could not remove workspace directory %s\n' "$worktree" >&2
             exit 1
