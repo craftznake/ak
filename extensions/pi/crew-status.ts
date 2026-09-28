@@ -133,20 +133,28 @@ function readKeyValueFile(file: string): Record<string, string> {
  *
  * Read fresh on every collection tick — the primary may re-register
  * mid-session and the token changes, so it is never cached for the process
- * lifetime. Returns undefined when no token file exists. */
+ * lifetime. A missing/malformed record is distinct from a valid record
+ * lacking an owner field (which remains fail-closed). */
 interface PrimaryToken {
-    sessionId?: string;
-    piSessionId?: string;
+    sessionId: string;
+    piSessionId: string;
 }
 
-function readPrimaryToken(root: string): PrimaryToken | undefined {
+type PrimaryTokenRead = { status: "valid"; token: PrimaryToken } | { status: "unavailable" };
+
+function readPrimaryToken(root: string): PrimaryTokenRead {
     const file = path.join(root, ".agent-kit", "primary");
-    if (!fs.existsSync(file)) return undefined;
-    const kv = readKeyValueFile(file);
-    return {
-        sessionId: kv.session_id || undefined,
-        piSessionId: kv.pi_session || undefined,
-    };
+    let text: string;
+    try {
+        text = fs.readFileSync(file, "utf8");
+    } catch {
+        return { status: "unavailable" };
+    }
+    const kv = parseKeyValue(text);
+    if (kv.schema !== "ak-primary.v1" || !kv.session_id) {
+        return { status: "unavailable" };
+    }
+    return { status: "valid", token: { sessionId: kv.session_id, piSessionId: kv.pi_session ?? "" } };
 }
 
 /** True iff this pi process is verifiably the one that registered the
@@ -498,6 +506,7 @@ export default function crewStatus(pi: ExtensionAPI) {
     let currentTheme: Theme | undefined;
     let root: string | undefined;
     let widgetInstalled = false;
+    let consecutiveUnavailableTokens = 0;
 
     const model = new Map<string, CrewRow>();
 
@@ -673,10 +682,24 @@ export default function crewStatus(pi: ExtensionAPI) {
             // the refresh. Render once, only after scoping, so stale rows
             // never flash.
             await refreshLiveStatuses();
-            const token = root ? readPrimaryToken(root) : undefined;
-            const isOwner = isRegisteredPrimary(token, latestCtx);
-            for (const [slug, crew] of [...model]) {
-                if (!isCrewVisible(crew, token, isOwner)) model.delete(slug);
+            const tokenRead = root ? readPrimaryToken(root) : { status: "unavailable" as const };
+            if (tokenRead.status === "valid") {
+                consecutiveUnavailableTokens = 0;
+                const token = tokenRead.token;
+                const isOwner = isRegisteredPrimary(token, latestCtx);
+                for (const [slug, crew] of [...model]) {
+                    if (!isCrewVisible(crew, token, isOwner)) model.delete(slug);
+                }
+            } else {
+                // A missing/partial token is indistinguishable from an interrupted atomic replace
+                // on one read. Keep the last visible snapshot for one poll; repeated failures
+                // revoke it, while any valid foreign token still revokes immediately above.
+                consecutiveUnavailableTokens++;
+                if (consecutiveUnavailableTokens >= 2) {
+                    for (const [slug, crew] of [...model]) {
+                        if (crew.sessionId) model.delete(slug);
+                    }
+                }
             }
             requestRender?.();
         } catch {
