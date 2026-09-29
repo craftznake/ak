@@ -34,7 +34,7 @@ ak crew-spawn fix-login "stabilize the flaky login test"
 AK_CREW_COMMAND='<harness/model command>' ak crew-spawn docs-sweep "update related docs with a lightweight model"
 ak crew-status
 ak crew-audit
-ak crew-report fix-login "ready for review"
+ak crew-report fix-login "ready for review" # primary-root command; workers should use quoted-heredoc ak done
 ak crew-peek fix-login 120
 ak crew-send fix-login "how's the test fix going?"
 ak crew-finish fix-login

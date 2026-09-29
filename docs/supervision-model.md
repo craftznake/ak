@@ -21,7 +21,7 @@ The primary agent supervises crews instead of babysitting every terminal manuall
 - `ak chat <slug> [lines]` - read the primary/worker chat transcript for a crew.
 - `ak crew-finish [--abandon] <slug>` - close a reported crew and remove its isolated worktree.
 
-Worker-side (run from inside a crew worktree): `ak reply <message>` messages the primary mid-task and wakes it; `ak done <message>` reports completion and wakes the primary; `ak ack [<seq>]` acknowledges a steering message by moving it to `handled/`.
+Worker-side (run from inside a crew worktree): `ak reply` and `ak done` read stdin with no message arguments or a single `-`; prefer a quoted heredoc (`ak done <<'AK_MESSAGE'`, body, `AK_MESSAGE`) so backticks and `$()` are passed literally. `ak reply` messages the primary mid-task and wakes it; `ak done` reports completion and wakes the primary; `ak ack [<seq>]` acknowledges a steering message by moving it to `handled/`.
 
 ## Recommended loop
 

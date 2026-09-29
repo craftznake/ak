@@ -31,16 +31,20 @@ ak primary-show
 When a crew is ready to hand back, the preferred command — runnable from inside the worker's own worktree — is:
 
 ```sh
-ak done "summary, changed files, checks, blockers"
+ak done <<'AK_MESSAGE'
+summary, changed files, checks, blockers
+AK_MESSAGE
 ```
 
-`ak done` resolves the crew slug and primary target from the worker role marker (`.agent-kit/role`), writes the report against the primary repo, appends the shared chat transcript, and wakes the primary. Use `ak reply "<message>"` for a mid-task question/status that wakes the primary without ending the task, and `ak chat` to read the transcript.
+`ak done` resolves the crew slug and primary target from the worker role marker (`.agent-kit/role`), writes the report against the primary repo, appends the shared chat transcript, and wakes the primary. Use the same quoted-heredoc form with `ak reply` for a mid-task question/status that wakes the primary without ending the task, and `ak chat` to read the transcript. `ak done` and `ak reply` also read stdin when called without arguments or with a single `-`. Prefer stdin for arbitrary text: inline double-quoted shell arguments execute backticks and `$(...)` before `ak` receives them.
 
 The equivalent primary-repo-rooted command (used by older crews, or when running from the primary repo) is:
 
 ```sh
-ak crew-report <slug> "summary, changed files, checks, blockers"
+ak crew-report <slug> <message text...>
 ```
+
+This is the primary-root form; worker-side handback should use `ak done` with stdin as shown above.
 
 Both go through the same core. That command:
 

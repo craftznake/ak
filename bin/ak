@@ -35,8 +35,11 @@ Usage:
   ak docs [list|show <name>]
 
 Worker commands (run from inside a crew worktree):
-  ak reply <message text...>   message the primary mid-task and wake it
-  ak done <message text...>    report completion and wake the primary
+  ak reply [<message text...>|-] message the primary mid-task and wake it
+  ak done [<message text...>|-]  report completion and wake the primary
+    With no message args or a single -, read the full message from stdin.
+    Prefer: ak done <<'EOF' (then message text and EOF); same for ak reply.
+    Avoid inline double-quoted backticks or $() (shell command substitution).
   ak ack [<seq>]              acknowledge inbox messages (move to handled/)
 
 Roles:
@@ -1116,7 +1119,7 @@ pending_recover() {
     summary=$(awk -F= '$1=="request_summary"{print $2; exit}' "$f")
     rec_id=$(rand_hex)
     rec_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    rec_body="Recovery request: no correlated reply arrived for your earlier steer. Please report back now with: ak done \"summary ... corr=$corr\" (original request: $summary)"
+    rec_body="Recovery request: no correlated reply arrived for your earlier steer. Please report back using a quoted heredoc so shell metacharacters stay literal (include corr=$corr on a line in the summary): ak done <<'AK_MESSAGE' ... AK_MESSAGE (original request: $summary)"
     rec_seq=$(inbox_write "$root" "$slug" "$rec_id" "$rec_at" ack-required "$rec_body")
     rec_tmp="$f.tmp-$$"
     awk -F= -v t="recovered_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" '$1!="phase" && $1!="recovered_at" {print} END{print "phase=recovery-sent"; print t}' "$f" >"$rec_tmp"
@@ -1444,8 +1447,8 @@ $brief
 - Run relevant checks.
 - Do not merge, force-push, reset, clean, or discard work.
 - Log spend when asked, at meaningful milestones, and before handback with: $ak_cmd crew-cost $slug <usd|unknown> "model/session, token estimate if known, and what work the spend covered" (run from "$root", or use \`cd "$root"\`).
-- Talk to the primary mid-task with: \`$ak_cmd reply "question or status"\` (works from this worktree; it wakes the primary).
-- When finished, run from this worktree: \`$ak_cmd done "summary, files changed, checks, cost notes, blockers"\`. This writes the report and wakes the primary.
+- Talk to the primary mid-task with: \`$ak_cmd reply <<'AK_MESSAGE'\` followed by the message and a line containing \`AK_MESSAGE\` (works from this worktree; it wakes the primary). Avoid inline double-quoted backticks or \`$()\`.
+- When finished, run from this worktree: \`$ak_cmd done <<'AK_MESSAGE'\` followed by the summary and a line containing \`AK_MESSAGE\`. This writes the report and wakes the primary. The quoted heredoc preserves backticks, dollar signs, quotes, and newlines.
 - Read the shared chat transcript any time with: \`$ak_cmd chat\`.
 - Steering messages arrive in $crew_dir/inbox/NNN.msg. When a terminal message points you there, list \`*.msg\`, read and act on each message in numeric order, then acknowledge each handled message with \`$ak_cmd ack <seq>\` (the move to handled/ IS the acknowledgement; without it the primary will ring again and eventually treat you as stuck). If a message body contains a \`corr=<hex>\` token, include that token verbatim in your \`$ak_cmd done\` summary so the primary can correlate your report.
 EOF
@@ -2534,17 +2537,31 @@ ak_chat() {
 }
 
 # reply: worker -> primary, mid-task (no completion). Wakes the primary.
+read_worker_message() {
+    if [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = "-" ]; }; then
+        cat
+    else
+        printf '%s' "$*"
+    fi
+}
+
 ak_reply() {
-    [ "$#" -ge 1 ] || {
-        printf 'usage: ak reply <message text...>\n' >&2
-        exit 2
-    }
+    case "${1:-}" in
+    -h | --help)
+        printf 'usage: ak reply [<message text...>|-]\nread stdin with no arguments or a single -; prefer a quoted heredoc for arbitrary text\n'
+        return 0
+        ;;
+    esac
+    if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != "-" ]; }; then
+        msg=$(printf '%s' "$*")
+    else
+        msg=$(read_worker_message "$@")
+    fi
     marker=$(require_worker_marker)
     slug=$(role_field "$marker" slug)
     proot=$(role_field "$marker" primary_repo)
     psession=$(role_field "$marker" primary_session)
     ptarget=$(role_field "$marker" primary_target)
-    msg=$*
     chat_append "$proot" "$slug" worker "$msg"
     framed=$(frame_message "$slug" "$msg")
     if [ -n "${AK_DEBUG_WAKE:-}" ]; then
@@ -2570,10 +2587,17 @@ ak_reply() {
 # done: worker completion. Writes the report against the primary repo and wakes
 # the primary. Runnable from the worker's own worktree.
 ak_done() {
-    [ "$#" -ge 1 ] || {
-        printf 'usage: ak done <message text...>\n' >&2
-        exit 2
-    }
+    case "${1:-}" in
+    -h | --help)
+        printf 'usage: ak done [<message text...>|-]\nread stdin with no arguments or a single -; prefer a quoted heredoc for arbitrary text\n'
+        return 0
+        ;;
+    esac
+    if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != "-" ]; }; then
+        msg=$(printf '%s' "$*")
+    else
+        msg=$(read_worker_message "$@")
+    fi
     marker=$(require_worker_marker)
     slug=$(role_field "$marker" slug)
     proot=$(role_field "$marker" primary_repo)
@@ -2581,8 +2605,8 @@ ak_done() {
         printf 'recorded primary_repo is missing: %s\n' "$proot" >&2
         exit 1
     }
-    chat_append "$proot" "$slug" worker "$*"
-    crew_report_core "$proot" "$slug" "$*"
+    chat_append "$proot" "$slug" worker "$msg"
+    crew_report_core "$proot" "$slug" "$msg"
 }
 
 # --- root-scoped primary lookup (works from any checkout) --------------------

@@ -98,8 +98,12 @@ Worker side (inside the crew worktree the primary spawned):
 
 ```sh
 ak role                 # -> worker
-ak reply "which config toggles the login timeout?"   # ask mid-task, wakes primary
-ak done "fixed the flaky wait, added a regression test, suite green"  # report + wake primary
+ak reply <<'AK_MESSAGE'  # ask mid-task, wakes primary
+which config toggles the login timeout?
+AK_MESSAGE
+ak done <<'AK_MESSAGE'   # report + wake primary
+fixed the flaky wait, added a regression test, suite green
+AK_MESSAGE
 ```
 
 For interactive planning:

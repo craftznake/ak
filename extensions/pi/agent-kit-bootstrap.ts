@@ -1,6 +1,5 @@
 // agent-kit-bootstrap: injects a short agent-kit bootstrap message at session
-// start and after compaction, with a dedup guard. Modeled on the superpowers.ts
-// pattern (context-event message injection with lifecycle flags).
+// start and after compaction, with a dedup guard.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const EXTREMELY_IMPORTANT_MARKER = "<EXTREMELY_IMPORTANT>";

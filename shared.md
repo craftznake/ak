@@ -15,7 +15,7 @@ On the first substantive turn of a session, determine your role before doing wor
 
 - Run `ak role` (or `ak role`). It prints `primary` or `worker`. Unset means `primary` by default.
 - If **primary** and not yet registered for this repo/session, run `ak primary-set`.
-- If **worker**, read your brief at `.agent-kit/crew/<slug>/brief.md`, follow the worker contract, and when finished run `ak done "<summary>"` (from your worktree) to report and wake the primary. Use `ak reply "<message>"` to talk to the primary mid-task, and `ak chat` to read the shared transcript.
+- If **worker**, read your brief at `.agent-kit/crew/<slug>/brief.md`, follow the worker contract, and when finished use `ak done <<'AK_MESSAGE'` with the summary on stdin and `AK_MESSAGE` as the closing line. Use the same form with `ak reply` to talk to the primary mid-task, and `ak chat` to read the shared transcript. Prefer stdin for arbitrary messages; inline double-quoted backticks and `$()` are evaluated by the invoking shell.
 
 Run `ak docs show roles-model` to read the full spec (works from any repo).
 
@@ -90,11 +90,11 @@ Before changing or extending one of these workflows, run `ak docs show <name>` a
 - For parallel work, prefer isolated Herdr tabs plus clean VCS workspaces (`jj workspace` for jj repos, git worktrees for git repos) over shared mutable terminals.
 - Have crews hand back with `ak done`/`ak crew-report` instead of routine polling; `ak done` runs from the worker's worktree, writes the report, and wakes the primary.
 - **Crew lifecycle is event-driven and sequential:** after spawning, do not poll for completion. Wait for the automatic report/wakeup while doing only independent useful work. When a report arrives, review that report and the actual patch before follow-up.
-- **Follow-up:** if changes are needed, send one concrete `ak crew-send <slug> "..."` to that same reported crew, with acceptance criteria and a request to hand back via `ak done`. Do not spawn a duplicate crew for the same task. Wait for the follow-up report, then review again.
+- **Follow-up:** if changes are needed, send one concrete `ak crew-send <slug> "..."` to that same reported crew, with acceptance criteria and a request to hand back via `ak done` using a quoted heredoc on stdin. Do not spawn a duplicate crew for the same task. Wait for the follow-up report, then review again.
 - **Close:** once the final report is reviewed and the crew worktree is clean, run `ak crew-finish <slug>`. If the crew is dirty, missing its report, or its work cannot be located/reviewed, do not finish it; recover or ask for guidance. Run `ak crew-audit` only when needed to authorize a requested cleanup/action, not repeatedly while waiting.
 - Do not repeatedly run `ak crew-status`, `ak crew-audit`, `ak crew-peek`, inspect transcripts, or otherwise poll to see whether a crew is done. Check status only to resolve a concrete blocker, respond to user direction, or before cleanup after a report.
 - **Style is part of acceptance:** before implementation, inspect the target file and adjacent code for naming, formatting, helper patterns, and user conventions. Include concrete examples in the brief. During review, compare the patch to those conventions and request a focused style pass from the same worker if needed before closing.
-- Workers can talk to the primary mid-task with `ak reply "<message>"`; both sides share a transcript readable with `ak chat`.
+- Workers can talk to the primary mid-task with `ak reply` reading a quoted heredoc on stdin; both sides share a transcript readable with `ak chat`.
 - Keep task labels stable and human-readable.
 
 ## Communication style

@@ -41,19 +41,19 @@ On the first substantive turn:
 
 1. Run `ak role`.
 2. If **primary** and not yet registered for this repo/session, run `ak primary-set` (see `docs/reporting-model.md`).
-3. If **worker**, read your brief at `.agent-kit/crew/<slug>/brief.md`, follow the worker contract, and when finished run `ak done "<summary>"` to report and wake the primary.
+3. If **worker**, read your brief at `.agent-kit/crew/<slug>/brief.md`, follow the worker contract, and when finished send the summary safely on stdin: `ak done <<'AK_MESSAGE'`, the summary, then `AK_MESSAGE` on its own line. The same form works for `ak reply`. This preserves arbitrary markdown; avoid inline double-quoted backticks or `$()` because the worker's shell evaluates them before `ak` receives the argument.
 
 ## Primary/worker chatbox
 
 Primary and workers share a durable per-crew transcript at `.agent-kit/crew/<slug>/chat.log` (lines of `who\ttimestamp\tmessage`).
 
 - Primary → worker: `ak crew-send <slug> "<message>"` writes a durable inbox record and rings the worker's doorbell (see `docs/delivery-protocol.md`).
-- Worker → primary, mid-task: `ak reply "<message>"` (logs it and wakes the primary; run from the worktree).
-- Worker → primary, completion: `ak done "<summary>"` (writes the report, logs it, wakes the primary).
+- Worker → primary, mid-task: `ak reply <<'AK_MESSAGE'` followed by the message and a closing `AK_MESSAGE` line (logs it and wakes the primary; run from the worktree).
+- Worker → primary, completion: `ak done <<'AK_MESSAGE'` followed by the summary and a closing `AK_MESSAGE` line (writes the report, logs it, wakes the primary). No-argument `ak done`/`ak reply` reads stdin too; a single `-` explicitly selects stdin.
 - Worker acknowledges a steering message: `ak ack [<seq>]` (moves the inbox record to `handled/`; the move is the ack).
 - Read the transcript: `ak chat <slug> [lines]` as primary, or just `ak chat` as a worker (it resolves its own slug).
 
-`ak reply` and `ak done` resolve the primary from the worker role marker, so they work from inside the worktree without extra arguments. `ak done` is the canonical worker handback; `ak crew-report <slug> "<summary>"` is the documented equivalent for the primary repo root, and both run the same core and write the same artifacts.
+`ak reply` and `ak done` resolve the primary from the worker role marker, so they work from inside the worktree without extra arguments. Use stdin (preferably a quoted heredoc) whenever text may contain shell metacharacters; a quoted heredoc passes backticks, dollar signs, and newlines literally. `ak done` is the canonical worker handback; `ak crew-report <slug> "<summary>"` is the documented equivalent for the primary repo root, and both run the same core and write the same artifacts.
 
 ## Backend
 

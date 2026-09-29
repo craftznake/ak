@@ -47,11 +47,15 @@ Then talk to the primary agent normally. For multi-step work it can spawn crews:
 ak crew-spawn fix-login "stabilize flaky login test"
 
 
-Crews report back with:
+Crews report back from their worktree with a quoted heredoc (preserves backticks, dollar signs, and newlines):
 
 ```sh
-ak crew-report fix-login "fixed, tests passed, ready for review"
+ak done <<'AK_MESSAGE'
+fixed, tests passed, ready for review
+AK_MESSAGE
+```
 
+From the primary repo root, `ak crew-report <slug> <message...>` is the equivalent.
 
 ## Shell convenience
 
