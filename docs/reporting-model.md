@@ -36,7 +36,7 @@ summary, changed files, checks, blockers
 AK_MESSAGE
 ```
 
-`ak done` resolves the crew slug and primary target from the worker role marker (`.agent-kit/role`), writes the report against the primary repo, appends the shared chat transcript, and wakes the primary. Use the same quoted-heredoc form with `ak reply` for a mid-task question/status that wakes the primary without ending the task, and `ak chat` to read the transcript. `ak done` and `ak reply` also read stdin when called without arguments or with a single `-`. Prefer stdin for arbitrary text: inline double-quoted shell arguments execute backticks and `$(...)` before `ak` receives them.
+`ak done` resolves the crew slug and primary repo from the worker role marker (`.agent-kit/role`), writes the report against the primary repo, appends the shared chat transcript, and wakes the primary using the current `.agent-kit/primary` registration. `ak reply` uses that same current registration for a mid-task question/status. The marker's spawn-time target and session are fallback values when no current registration exists; a current `inject=0` registration disables injection. Use the same quoted-heredoc form with `ak reply` for a mid-task question/status that wakes the primary without ending the task, and `ak chat` to read the transcript. `ak done` and `ak reply` also read stdin when called without arguments or with a single `-`. Prefer stdin for arbitrary text: inline double-quoted shell arguments execute backticks and `$(...)` before `ak` receives them.
 
 The equivalent primary-repo-rooted command (used by older crews, or when running from the primary repo) is:
 

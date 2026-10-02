@@ -2560,8 +2560,9 @@ ak_reply() {
     marker=$(require_worker_marker)
     slug=$(role_field "$marker" slug)
     proot=$(role_field "$marker" primary_repo)
-    psession=$(role_field "$marker" primary_session)
-    ptarget=$(role_field "$marker" primary_target)
+    psession=$(primary_field_at "$proot" session 2>/dev/null || role_field "$marker" primary_session)
+    ptarget=$(primary_field_at "$proot" target 2>/dev/null || role_field "$marker" primary_target)
+    inject=$(primary_field_at "$proot" inject 2>/dev/null || printf 1)
     chat_append "$proot" "$slug" worker "$msg"
     framed=$(frame_message "$slug" "$msg")
     if [ -n "${AK_DEBUG_WAKE:-}" ]; then
@@ -2570,6 +2571,8 @@ ak_reply() {
     fi
     if [ "${AK_NO_WAKE:-0}" = 1 ]; then
         printf 'replied (logged to chat); wake disabled via AK_NO_WAKE\n'
+    elif [ "${inject:-1}" != 1 ]; then
+        printf 'replied (logged to chat); primary wake disabled in registration\n'
     elif [ -n "$ptarget" ]; then
         if backend_wake "$psession" "$ptarget" "$framed"; then
             printf 'replied to primary and sent wake: %s\n' "$slug"
@@ -2674,6 +2677,9 @@ crew_report_core() {
     if [ -n "$corr" ]; then
         pending_resolve "$root" "$slug" "$corr" "$report_id"
     fi
+    # Resolve the current primary registration at report time, rather than
+    # the worker's spawn-time target snapshot. Primary panes can be recreated
+    # or renumbered while a crew is running.
     session=$(primary_field_at "$root" session 2>/dev/null || printf '%s' "${AK_HERDR_SESSION:-default}")
     inject=$(primary_field_at "$root" inject 2>/dev/null || printf 1)
     target=$(primary_field_at "$root" target 2>/dev/null || true)
